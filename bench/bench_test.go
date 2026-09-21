@@ -69,6 +69,7 @@ const (
 
 type runner interface {
 	run(b *testing.B, method, path string, want int)
+	runParallel(b *testing.B, method, path string, want int)
 }
 
 type discardRW struct {
@@ -100,6 +101,10 @@ func (r httpRunner) run(b *testing.B, method, path string, want int) {
 	}
 }
 
+// runParallel drives the router from b.RunParallel. Each goroutine gets its
+// own request and ResponseWriter: routers may set r.Pattern / path values on
+// the request they are handed, so sharing one would race.
+
 type fiberRunner struct{ h fasthttp.RequestHandler }
 
 func (r fiberRunner) run(b *testing.B, method, path string, want int) {
@@ -114,6 +119,37 @@ func (r fiberRunner) run(b *testing.B, method, path string, want int) {
 			b.Fatalf("code=%d want=%d", got, want)
 		}
 	}
+}
+
+func (r httpRunner) runParallel(b *testing.B, method, path string, want int) {
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		req := httptest.NewRequest(method, path, nil)
+		d := &discardRW{}
+		for pb.Next() {
+			d.code = 0
+			r.h.ServeHTTP(d, req)
+			if d.code != want {
+				b.Errorf("code=%d want=%d", d.code, want)
+			}
+		}
+	})
+}
+
+func (r fiberRunner) runParallel(b *testing.B, method, path string, want int) {
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		var ctx fasthttp.RequestCtx
+		ctx.Request.Header.SetMethod(method)
+		ctx.Request.SetRequestURI(path)
+		for pb.Next() {
+			ctx.Response.Reset()
+			r.h(&ctx)
+			if ctx.Response.StatusCode() != want {
+				b.Errorf("code=%d want=%d", ctx.Response.StatusCode(), want)
+			}
+		}
+	})
 }
 
 func noop(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }
@@ -506,6 +542,28 @@ func BenchmarkConstrainedPlain(b *testing.B) {
 			}
 			b.Run(sc.name+"/"+v.name, func(b *testing.B) {
 				v.build().run(b, sc.method, sc.path, sc.want)
+			})
+		}
+	}
+}
+
+// BenchmarkParallel measures throughput under b.RunParallel (GOMAXPROCS
+// goroutines). Each goroutine has its own request and writer.
+func BenchmarkParallel(b *testing.B) {
+	scs := []struct {
+		name, method, path string
+		want               int
+	}{
+		{"static", "GET", pStatic, 204},
+		{"param", "GET", pParam, 204},
+		{"deep", "GET", pDeep, 204},
+		{"constrained-uuid", "GET", pUUID, 204},
+		{"miss", "GET", pMiss, 404},
+	}
+	for _, sc := range scs {
+		for _, v := range variants {
+			b.Run(sc.name+"/"+v.name, func(b *testing.B) {
+				v.build().runParallel(b, sc.method, sc.path, sc.want)
 			})
 		}
 	}

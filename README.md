@@ -183,6 +183,10 @@ fiber** (method, harness and caveats) is in
 | 404 | **14.4** | 243.8 | 52.2 | 632.5 | 546.1 | 297.5 |
 | allocs | **0** | 0–1 | 0 | 0 | 0–14 | 2–5 |
 
+Under `b.RunParallel` (one goroutine per core) `Mux` is first or second
+everywhere, and `Compat` tracks raw `net/http` — the `ServeMux`'s `RWMutex` is
+what limits both, not the routing. Details in [`bench/README.md`](bench/README.md).
+
 `Mux` wins every no-constraint scenario, with 0 allocs; in the group that
 **actually validates constraints** (us, chi, gorilla) it wins by 2.7–10x.
 `Compat` beats Chi — the closest peer, same API proposition — by ~2.5x on hits,
