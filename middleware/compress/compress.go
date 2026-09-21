@@ -86,7 +86,7 @@ func (w *writer) Write(b []byte) (int, error) {
 
 func (w *writer) close() {
 	if w.zw != nil {
-		w.zw.Close()
+		_ = w.zw.Close()
 		w.pool.Put(w.zw)
 		w.zw = nil
 	}
@@ -99,7 +99,7 @@ func (w *writer) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 // underlying writer.
 func (w *writer) Flush() {
 	if w.zw != nil {
-		w.zw.Flush()
+		_ = w.zw.Flush()
 	}
 	_ = http.NewResponseController(w.ResponseWriter).Flush()
 }
