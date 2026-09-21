@@ -63,9 +63,9 @@ var methodNames = [numMethods]string{
 
 type tnode struct {
 	// Static children. Up to 4 in an inline array (linear compare of short keys
-	// beats hashing at low fan-out); a map beyond that. A segment-level radix
-	// was measured slower here: keys are short, and a map hashes once while the
-	// radix pays per-level pointer chasing.
+	// beats hashing at low fan-out); a sorted slice with a first-byte bucket
+	// beyond that. A segment-level radix measures slower here: keys are short,
+	// and a map hashes once while a radix pays per-level pointer chasing.
 	kids  [4]staticChild // inline children (low fan-out, no hashing)
 	nkids int
 	// Beyond 4 children: sorted slice + a first-byte bucket index (O(1) bucket,

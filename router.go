@@ -14,8 +14,8 @@
 // Where Chi and the stdlib disagree, the stdlib wins (Compat):
 //
 //   - path canonicalization ("//", ".") redirects, like net/http;
-//   - "/x" with only "/x/" registered gets net/http's redirect (301/307,
-//     depending on the Go version), not Chi's 404;
+//   - "/x" with only "/x/" registered gets net/http's redirect, exactly as the
+//     stdlib issues it, not Chi's 404;
 //   - param values are unescaped, as net/http.PathValue returns them;
 //   - the 405 Allow header is net/http's single comma-joined value;
 //   - HEAD is served from GET routes, no Head/GetHead needed.

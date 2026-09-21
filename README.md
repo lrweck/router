@@ -69,11 +69,14 @@ The full, per-project attribution (with licenses) is in
 
 | case | Chi | here (= stdlib) |
 |---|---|---|
-| `/x` with only `/x/` registered | 404 | redirect → `/x/` (301/307) |
-| `//` or `.` in the path | routes with empty params | redirect (canonicalization) |
+| `/x` with only `/x/` registered | 404 | redirect to `/x/`, exactly as net/http does |
+| `//` or `.` in the path | routes with empty params | redirect (canonicalization), as net/http does |
 | param with `%2f` | returns the escaped value | returns it decoded |
 | 405 `Allow` | one header per method | a single `"GET, HEAD, POST"` |
 | `HEAD` | needs `Head`/`GetHead` | served from `GET` |
+
+`net/http`'s routing behavior is the product of a lot of careful work; we follow
+it rather than second-guess it.
 
 - **Hacker's Delight** — the SWAR (SIMD-within-a-register) byte-class scanner
   follows the classic bit tricks, with carry-free comparisons (the usual
@@ -88,8 +91,8 @@ pay off. Everything below is measured in [`bench/README.md`](bench/README.md).
 
 - **Native param names.** The placeholder in the `ServeMux` pattern is the name
   you wrote (`/users/{id}`), so `net/http` itself fills `r.PathValue("id")` — no
-  `SetPathValue` and no `otherValues` map. That map was the single biggest
-  allocation in the hot path before this change.
+  `SetPathValue` and none of the `otherValues` map that `net/http` allocates
+  for names that aren't in the pattern.
 - **Lazy routing Context.** A plain route (static segments and native
   `{param}`) allocates **no context at all**: `Param(r, "id")` reads the
   stdlib's path value directly. The Context is only created when a route really
@@ -103,12 +106,11 @@ pay off. Everything below is measured in [`bench/README.md`](bench/README.md).
   an O(1) check on the first static segment. That is why our 404 is ~14 ns while
   the raw stdlib's is ~546 ns.
 - **Params on the stack.** `extract` writes into a fixed array in the caller's
-  frame; the slice used to escape to the heap (one 256 B allocation per
-  request) until it was passed in instead of returned.
+  frame. Passing the buffer in, rather than returning a slice, keeps it on the
+  stack — no 256 B heap allocation per request.
 - **The middleware chain is built once**, at `freeze()` (the first
   route/`With`/`Group`/`Route`/`Mount`), not on the first request — so the
-  constructors run exactly once and the chain is read-only while serving (this
-  also removed a data race).
+  constructors run exactly once and the chain is read-only while serving.
 
 ### In `Mux` (the purpose-built trie)
 
@@ -119,8 +121,7 @@ pay off. Everything below is measured in [`bench/README.md`](bench/README.md).
   linear compare over up to four children (faster than hashing a short key).
   Beyond that they live in a sorted slice with a 257-entry first-byte index
   (O(1) to the bucket) and a binary search inside it. A per-segment radix and a
-  full-key binary search were both implemented and **measured slower**; the
-  comments in `mux.go` record that.
+  full-key binary search both **measure slower** here (see `mux.go`).
 - **`Params` by value, keys shared per route.** Parameters are a fixed array
   passed by value (no allocation), with the names in a pointer shared by the
   route — and stored **per method**, so `GET /u/{id}` and `POST /u/{name}` can
@@ -140,8 +141,8 @@ pay off. Everything below is measured in [`bench/README.md`](bench/README.md).
   `bytesInClass` call over the value.
 - **Fixed-shape sequences** — UUID, dates (`[0-9]{4}-[0-9]{2}-[0-9]{2}`),
   versions, IPs — compile to a **linear pass**: literals and fixed-count classes
-  matched left to right, no backtracking, no allocation. This is what took a
-  UUID constraint from ~1400 ns to ~120 ns.
+  matched left to right, no backtracking, no allocation. A UUID constraint
+  validates in ~120 ns this way.
 - **SWAR / SIMD** in `bytesInClass`: 8 bytes per iteration with `uint64`
   arithmetic in the default build; the portable `simd` package (32-byte
   vectors) under `GOEXPERIMENT=simd`; SWAR again for the tail, for short inputs

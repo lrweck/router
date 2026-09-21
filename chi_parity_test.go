@@ -509,8 +509,7 @@ func TestChiMuxRouteGroups(t *testing.T) {
 func TestChiMuxBig(t *testing.T) {
 	r := chiBigMux(t)
 	// Divergence: Chi returns 404 for "/folders"; the stdlib ServeMux
-	// canonicalizes it to "/folders/" with a redirect (301 or 307 depending on
-	// the Go version). Documented.
+	// canonicalizes it to "/folders/" with a redirect, as net/http does.
 	if w := do(t, r, "GET", "/folders"); !isRedirect(w.Code) || w.Header().Get("Location") != "/folders/" {
 		t.Errorf("GET /folders = %d %q, want a redirect -> /folders/", w.Code, w.Header().Get("Location"))
 	}

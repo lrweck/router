@@ -10,14 +10,15 @@ import (
 	"testing"
 )
 
-// isRedirect reports whether code is a redirect. The exact code (301 vs 307)
-// for the ServeMux's canonicalization/trailing-slash redirects changed across
-// Go versions, and it is the stdlib's choice, not ours.
+// isRedirect reports whether code is a redirect. The exact status for the
+// ServeMux's canonicalization and trailing-slash redirects is net/http's to
+// choose, so accept any redirect rather than pinning one.
 func isRedirect(code int) bool {
 	return code == http.StatusMovedPermanently || code == http.StatusTemporaryRedirect
 }
 
-// TestStdlibPathCleaning: the stdlib cleans "//" and "." segments with a 301.
+// TestStdlibPathCleaning: the stdlib cleans "//" and "." segments by
+// redirecting to the cleaned path.
 // Chi routes "/users///c" to /users/{x}/{y}/{z} with empty params.
 func TestStdlibPathCleaning(t *testing.T) {
 	r := NewRouter()
@@ -33,9 +34,8 @@ func TestStdlibPathCleaning(t *testing.T) {
 	}
 }
 
-// TestStdlibTrailingSlashRedirect: with only "/x/" registered, "/x" gets a
-// redirect from the stdlib (301 or 307 depending on the Go version); Chi
-// answers 404.
+// TestStdlibTrailingSlashRedirect: with only "/x/" registered, "/x" gets
+// net/http's redirect; Chi answers 404.
 func TestStdlibTrailingSlashRedirect(t *testing.T) {
 	r := NewRouter()
 	r.Get("/articles/", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("list")) })
