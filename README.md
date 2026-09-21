@@ -81,50 +81,89 @@ The full, per-project attribution (with licenses) is in
 
 ## The tricks
 
-None of this is magic — it is the result of measuring and cutting what doesn't
-pay off.
+None of this is magic — it is the result of profiling and cutting what doesn't
+pay off. Everything below is measured in [`bench/README.md`](bench/README.md).
 
-**In `Compat` (on top of `ServeMux`):**
+### In `Compat` (on top of `ServeMux`)
 
 - **Native param names.** The placeholder in the `ServeMux` pattern is the name
-  you wrote, so `net/http` fills `r.PathValue("id")` for free — no need to
-  create `SetPathValue`'s `otherValues` map.
-- **Lazy context.** Plain routes (static and native `{param}`) do not allocate
-  the routing Context per request. It only exists when the route needs it:
-  mounts, wildcards, mixed segments (`{a}-{b}`), or a renamed param.
-- **Catch-all + filter.** A least-specific `"/"` handler receives the misses,
-  and an O(1) filter on the first static segment avoids the method scan
-  (`matchingMethods`) that `ServeMux` does on 404/405.
-- **A single match.** With no custom `NotFound`/`MethodNotAllowed`, there is no
-  double probe: just one `ServeMux.ServeHTTP`.
+  you wrote (`/users/{id}`), so `net/http` itself fills `r.PathValue("id")` — no
+  `SetPathValue` and no `otherValues` map. That map was the single biggest
+  allocation in the hot path before this change.
+- **Lazy routing Context.** A plain route (static segments and native
+  `{param}`) allocates **no context at all**: `Param(r, "id")` reads the
+  stdlib's path value directly. The Context is only created when a route really
+  needs it — mounts (params accumulate across sub-routers), wildcards, mixed
+  segments (`{a}-{b}`) or a renamed param.
+- **A single match.** With no custom `NotFound`/`MethodNotAllowed`, `ServeHTTP`
+  goes straight to `ServeMux.ServeHTTP`; there is no `mux.Handler` probe first.
+- **Catch-all + a first-segment filter.** The stdlib, on a 404/405, walks the
+  whole tree to compute the `Allow` list (`matchingMethods`). We register a
+  least-specific `"/"` handler so the miss lands on us instead, and answer with
+  an O(1) check on the first static segment. That is why our 404 is ~14 ns while
+  the raw stdlib's is ~546 ns.
+- **Params on the stack.** `extract` writes into a fixed array in the caller's
+  frame; the slice used to escape to the heap (one 256 B allocation per
+  request) until it was passed in instead of returned.
+- **The middleware chain is built once**, at `freeze()` (the first
+  route/`With`/`Group`/`Route`/`Mount`), not on the first request — so the
+  constructors run exactly once and the chain is read-only while serving (this
+  also removed a data race).
 
-**In `Mux` (the purpose-built trie):**
+### In `Mux` (the purpose-built trie)
 
-- **Compare directly against the path.** A static child is matched by comparing
-  the path bytes, with no segment extraction and no `/` scan.
-- **First-byte bucket.** Beyond 4 children they live in a sorted slice with a
-  first-byte index (O(1) to the bucket) plus a binary search inside it —
-  measurably faster than a map for short segment keys.
-- **`Params` by value.** Params live in a fixed array passed by value, with the
-  keys in a pointer shared per route: **0 allocs**, and each method can use
-  different param names for the same shape.
-- **Lean 404/405.** `Allow` is precomputed at registration, and the 405 (like
-  the 404) writes no body — just status + header.
+- **Match by comparing bytes against the path.** A static child is matched with
+  `path[start:start+len(key)] == key` plus a segment-boundary check — no
+  segment slicing, no `/` scan.
+- **Children: inline up to 4, then a first-byte bucket.** Low fan-out is a
+  linear compare over up to four children (faster than hashing a short key).
+  Beyond that they live in a sorted slice with a 257-entry first-byte index
+  (O(1) to the bucket) and a binary search inside it. A per-segment radix and a
+  full-key binary search were both implemented and **measured slower**; the
+  comments in `mux.go` record that.
+- **`Params` by value, keys shared per route.** Parameters are a fixed array
+  passed by value (no allocation), with the names in a pointer shared by the
+  route — and stored **per method**, so `GET /u/{id}` and `POST /u/{name}` can
+  coexist on the same shape.
+- **Backtracking only where it's needed.** Static edges are walked in a loop;
+  recursion (with parameter rollback) is reserved for param/mixed/wildcard
+  alternatives, and constraints are ordered most-specific-first.
+- **`Allow` precomputed at registration**, and the 405 (like the 404) writes no
+  body: status + header only.
+- **`nextSlash`** uses `strings.IndexByte` (the runtime's SIMD `memchr`) for
+  remainders of 16+ bytes and a byte loop below that, where the call isn't worth
+  it.
 
-**In the constraints (without `regexp`):**
+### In the constraints (without `regexp`)
 
-- **A linear validator for fixed shapes.** UUID, date
-  (`[0-9]{4}-[0-9]{2}-[0-9]{2}`), version, IP — sequences of literals and
-  fixed-size classes — become a single linear pass, no backtracking and no
-  allocation. (This took a UUID from ~1400 ns to ~120 ns.)
-- **SWAR / SIMD.** The per-byte class check uses SWAR (8 bytes per iteration
-  with `uint64` arithmetic, carry-free comparisons) in the default build, and
-  the portable `simd` package when compiled with `GOEXPERIMENT=simd`. Where the
-  vector can't run (a tail shorter than one vector, short input, emulated SIMD)
-  SWAR takes over. Classes with a byte ≥128 fall back to the plain loop.
+- **Single repeated class** (`[0-9]+`, `[a-z0-9-]+`, `\d{4}`) compiles to one
+  `bytesInClass` call over the value.
+- **Fixed-shape sequences** — UUID, dates (`[0-9]{4}-[0-9]{2}-[0-9]{2}`),
+  versions, IPs — compile to a **linear pass**: literals and fixed-count classes
+  matched left to right, no backtracking, no allocation. This is what took a
+  UUID constraint from ~1400 ns to ~120 ns.
+- **SWAR / SIMD** in `bytesInClass`: 8 bytes per iteration with `uint64`
+  arithmetic in the default build; the portable `simd` package (32-byte
+  vectors) under `GOEXPERIMENT=simd`; SWAR again for the tail, for short inputs
+  and when SIMD is emulated. Classes with a byte ≥128 fall back to the plain
+  loop.
 - **Literal alternation** (`(asc|desc)`) uses explicit, allocation-free
-  backtracking, and the generic matcher has a step *budget* so a pathological
-  pattern can't become a DoS vector.
+  backtracking.
+- **The generic fallback** keeps a step *budget*, so a pathological pattern
+  fails the match (404) instead of hanging the server — a deliberate ceiling.
+
+## Reality check
+
+Routing is a **tiny** part of a real request. A route match here costs tens of
+nanoseconds; a database query, a file read or an outbound HTTP call costs
+**microseconds to milliseconds**. In other words: **the moment your handler
+touches I/O, any saving you got from the router disappears into the noise** —
+you'd have to save the entire router cost hundreds of times over to matter.
+
+So pick a router for its API, its correctness and its behavior, not for the
+benchmark. Performance is a tie-breaker between options you already like, not a
+reason to change your architecture. The numbers in `bench/` are there to show
+the work is honest, not to promise your service will be faster.
 
 ## Performance
 

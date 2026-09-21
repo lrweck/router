@@ -122,6 +122,12 @@ scenario.
 
 ### What this does NOT measure
 
+**Routing is a tiny slice of a real request.** Any I/O — a database query, a
+file read, an outbound HTTP call — costs microseconds to milliseconds, while
+everything below is tens of nanoseconds. In a handler that touches I/O these
+differences are invisible; treat them as a tie-breaker, not a reason to pick an
+architecture. Specifically, this does not measure:
+
 * Real server I/O, connection handling, TLS, keep-alive.
 * Middleware chains, request parsing (headers/body), JSON encoding.
 * Concurrency/throughput under load — these are single-goroutine, single-path
