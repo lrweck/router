@@ -96,6 +96,25 @@ func TestMuxHighFanout(t *testing.T) {
 	}
 }
 
+// TestMuxBucketAtPathEnd: a path that ends exactly at a node carrying the
+// first-byte bucket index reaches childAt with start == len(path); it must miss
+// cleanly instead of reading past the path.
+func TestMuxBucketAtPathEnd(t *testing.T) {
+	m := NewMux()
+	for i := range 12 {
+		m.Get(fmt.Sprintf("/a/x%d", i), typed)
+		m.Get(fmt.Sprintf("/r%d", i), typed)
+	}
+	for _, p := range []string{"/", "/a", "/a/", "/r0/", "/nope/"} {
+		if got := do(t, m, "GET", p).Code; got != 404 {
+			t.Errorf("GET %s = %d, want 404", p, got)
+		}
+	}
+	if got := do(t, m, "GET", "/a/x3").Code; got != 204 {
+		t.Errorf("GET /a/x3 = %d, want 204", got)
+	}
+}
+
 // TestMuxMethods: verbs, HEAD-from-GET, 405 Allow, and custom methods.
 func TestMuxMethods(t *testing.T) {
 	m := NewMux()

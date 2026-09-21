@@ -118,12 +118,25 @@ pay off. Everything below is measured in [`bench/README.md`](bench/README.md).
 
 - **Match by comparing bytes against the path.** A static child is matched with
   `path[start:start+len(key)] == key` plus a segment-boundary check — no
-  segment slicing, no `/` scan.
-- **Children: inline up to 4, then a first-byte bucket.** Low fan-out is a
-  linear compare over up to four children (faster than hashing a short key).
-  Beyond that they live in a sorted slice with a 257-entry first-byte index
-  (O(1) to the bucket) and a binary search inside it. A per-segment radix and a
-  full-key binary search both **measure slower** here (see `mux.go`).
+  segment slicing, no `/` scan. In a small bucket (up to four children) the
+  comparison runs straight against the path; only a large bucket extracts the
+  segment once and binary-searches it.
+- **A compact node: one child inline, then a sorted slice, then a bucket
+  index.** The common case — a node with a single static child — keeps that
+  child inline; two or more go into a sorted `kids` slice; past eight children
+  a 257-entry first-byte index gives O(1) access to the bucket, which is then
+  binary-searched. A per-segment radix and a full-key binary search both
+  **measure slower** here (see `mux.go`).
+- **Handlers live off the node.** The per-method handler table sits behind a
+  `*leaf` pointer allocated only for terminal nodes, so internal nodes stay
+  small (a `tnode` is 152 bytes) and a walk under load touches fewer cache
+  lines.
+- **The path is decoded once, the method resolved once.** `dispatch` computes
+  the request path a single time, and `find` returns the matched `methodEntry`
+  together with the node, so the method is looked up exactly once per request.
+- **No context lookup when there is no context.** A `Mux` that is never mounted
+  under another one skips `RouteContext` entirely; only a mounted `Mux` (which
+  may inherit a parent's routing Context) probes the request context.
 - **`Params` by value, keys shared per route.** Parameters are a fixed array
   passed by value (no allocation), with the names in a pointer shared by the
   route — and stored **per method**, so `GET /u/{id}` and `POST /u/{name}` can
@@ -176,19 +189,20 @@ fiber** (method, harness and caveats) is in
 
 | scenario | **mux** | httprouter | gin | echo | stdlib | chi |
 |---|---:|---:|---:|---:|---:|---:|
-| static | **24.7** | 26.2 | 40.2 | 36.1 | 65.1 | 191.5 |
-| param | **36.7** | 56.9 | 41.2 | 50.0 | 108.8 | 329.8 |
-| deep | **55.5** | 71.5 | 61.1 | 76.4 | 251.2 | 382.9 |
-| wildcard | **30.9** | 42.9 | 45.1 | 40.3 | 276.8 | 308.2 |
-| 404 | **14.4** | 243.8 | 52.2 | 632.5 | 546.1 | 297.5 |
+| static | **18.0** | 21.0 | 35.5 | 34.0 | 58.0 | 182.5 |
+| param | **32.0** | 57.0 | 41.0 | 50.5 | 96.5 | 327.5 |
+| deep | **52.0** | 69.5 | 55.0 | 72.5 | 237.0 | 387.0 |
+| wildcard | **24.0** | 38.0 | 40.0 | 36.0 | 248.0 | 297.5 |
+| 404 | **17.0** | 227.5 | 52.0 | 578.5 | 500.5 | 290.0 |
 | allocs | **0** | 0–1 | 0 | 0 | 0–14 | 2–5 |
 
-Under `b.RunParallel` (one goroutine per core) `Mux` is first or second
-everywhere, and `Compat` tracks raw `net/http` — the `ServeMux`'s `RWMutex` is
-what limits both, not the routing. Details in [`bench/README.md`](bench/README.md).
+Under `b.RunParallel` (one goroutine per core) `Mux` leads every no-constraint
+scenario (static 2.0 ns, param 4.0, deep 7.0, miss 2.0), and `Compat` tracks raw
+`net/http` — the `ServeMux`'s `RWMutex` is what limits both, not the routing.
+Details in [`bench/README.md`](bench/README.md).
 
 `Mux` wins every no-constraint scenario, with 0 allocs; in the group that
-**actually validates constraints** (us, chi, gorilla) it wins by 2.7–10x.
+**actually validates constraints** (us, chi, gorilla) it wins by ~5–11x.
 `Compat` beats Chi — the closest peer, same API proposition — by ~2.5x on hits,
 allocating the same as raw stdlib.
 

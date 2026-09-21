@@ -63,25 +63,28 @@ var methodNames = [numMethods]string{
 }
 
 type tnode struct {
-	// Static children. Up to 4 in an inline array (linear compare of short keys
-	// beats hashing at low fan-out); a sorted slice with a first-byte bucket
-	// beyond that. A segment-level radix measures slower here: keys are short,
-	// and a map hashes once while a radix pays per-level pointer chasing.
-	kids  [4]staticChild // inline children (low fan-out, no hashing)
-	nkids int
-	// Beyond 4 children: sorted slice + a first-byte bucket index (O(1) bucket,
-	// then a binary search within it). Measured faster than a map for the short
-	// segment keys a router sees.
-	more  []staticChild
-	first []int16 // 257 entries: first[b]..first[b+1] is the bucket for byte b
+	// Static children. A single child (the common case) is stored inline; two
+	// or more go into a sorted slice, with a first-byte bucket index once there
+	// are enough of them to make it worth the memory. Internal nodes stay small
+	// because the handler table lives in *leaf, only on terminals.
+	one   staticChild
+	kids  []staticChild
+	first []int16
 
 	params []*tnode // {name} / {a}-{b} edges, constrained first
 	wild   *tnode   // * edge
-	isWild bool     // this node is a catch-all (matches regardless of trailing /)
+	leaf   *leaf    // handlers, only on terminal nodes
 	seg    *segment
-	trail  bool // pattern ended with '/'
 	pat    string
+	nkids  int
+	isWild bool // this node is a catch-all (matches regardless of trailing /)
+	trail  bool // pattern ended with '/'
+}
 
+// leaf holds the handlers of a terminal node. Keeping it out of tnode shrinks
+// every internal node (most nodes), which matters for cache behaviour under
+// concurrent load.
+type leaf struct {
 	h     [numMethods]methodEntry
 	other map[string]methodEntry // custom methods
 	all   methodEntry            // handler for every method (Mount/Any)
@@ -96,32 +99,48 @@ type staticChild struct {
 
 // addStatic returns the static child for key, creating it if needed.
 func (n *tnode) addStatic(key string) *tnode {
-	for i := 0; i < n.nkids; i++ {
+	switch n.nkids {
+	case 0:
+		c := &tnode{}
+		n.one = staticChild{key, c}
+		n.nkids = 1
+		return c
+	case 1:
+		if n.one.key == key {
+			return n.one.n
+		}
+		c := &tnode{}
+		n.kids = []staticChild{n.one, {key, c}}
+		n.one = staticChild{}
+		n.nkids = 2
+		n.sortKids()
+		return c
+	}
+	for i := range n.kids {
 		if n.kids[i].key == key {
 			return n.kids[i].n
 		}
 	}
-	for i := range n.more {
-		if n.more[i].key == key {
-			return n.more[i].n
-		}
-	}
-	if n.nkids < len(n.kids) && n.more == nil {
-		c := &tnode{}
-		n.kids[n.nkids] = staticChild{key, c}
-		n.nkids++
-		return c
-	}
-	if n.more == nil { // promote the inline children
-		n.more = append(n.more, n.kids[:n.nkids]...)
-		n.nkids = 0
-	}
 	c := &tnode{}
-	n.more = append(n.more, staticChild{key, c})
-	slices.SortFunc(n.more, func(a, b staticChild) int { return strings.Compare(a.key, b.key) })
-	n.rebuildFirst()
+	n.kids = append(n.kids, staticChild{key, c})
+	n.nkids++
+	n.sortKids()
 	return c
 }
+
+func (n *tnode) sortKids() {
+	slices.SortFunc(n.kids, func(a, b staticChild) int { return strings.Compare(a.key, b.key) })
+	if n.nkids > firstByteThreshold {
+		n.rebuildFirst()
+	}
+}
+
+// firstByteThreshold is where the bucket index starts paying for its memory.
+const firstByteThreshold = 8
+
+// smallBucket is the bucket size below which a direct compare beats extracting
+// the segment and binary-searching it.
+const smallBucket = 4
 
 // rebuildFirst rebuilds the first-byte bucket index (registration-time).
 func (n *tnode) rebuildFirst() {
@@ -129,49 +148,73 @@ func (n *tnode) rebuildFirst() {
 		n.first = make([]int16, 257)
 	}
 	i := 0
-	for b := range 256 {
-		for i < len(n.more) && int(n.more[i].key[0]) < b {
+	for b := 0; b < 256; b++ {
+		for i < len(n.kids) && int(n.kids[i].key[0]) < b {
 			i++
 		}
 		n.first[b] = int16(i)
 	}
-	n.first[256] = int16(len(n.more))
+	n.first[256] = int16(len(n.kids))
 }
 
 // childAt matches a static child directly against path[start:], returning the
 // child and the index just past the segment. It compares against the path with
-// no segment extraction and no hashing: inline children (low fan-out) linearly,
-// the rest by a binary search on the first byte over a sorted slice.
+// no segment extraction and no hashing.
 func (n *tnode) childAt(path string, start int) (*tnode, int) {
-	for k := 0; k < n.nkids; k++ {
-		key := n.kids[k].key
-		if len(path)-start >= len(key) && path[start:start+len(key)] == key {
-			adv := start + len(key)
-			if adv == len(path) || path[adv] == '/' {
-				return n.kids[k].n, adv
-			}
+	switch n.nkids {
+	case 0:
+		return nil, 0
+	case 1:
+		if c, adv, ok := matchChild(n.one, path, start); ok {
+			return c, adv
 		}
+		return nil, 0
 	}
-	if n.more != nil && start < len(path) {
+	if n.first != nil && start < len(path) {
 		b := int(path[start])
-		lo, hi := int(n.first[b]), int(n.first[b+1])
-		if lo < hi {
-			j := nextSlash(path, start)
-			key := path[start:j]
-			for lo < hi {
-				mid := int(uint(lo+hi) >> 1)
-				if n.more[mid].key < key {
-					lo = mid + 1
-				} else {
-					hi = mid
+		lo, ub := int(n.first[b]), int(n.first[b+1])
+		if ub-lo <= smallBucket {
+			for i := lo; i < ub; i++ {
+				if c, adv, ok := matchChild(n.kids[i], path, start); ok {
+					return c, adv
 				}
 			}
-			if lo < len(n.more) && n.more[lo].key == key {
-				return n.more[lo].n, j
+			return nil, 0
+		}
+		if lo < ub {
+			j := nextSlash(path, start)
+			key := path[start:j]
+			for lo < ub {
+				mid := int(uint(lo+ub) >> 1)
+				if n.kids[mid].key < key {
+					lo = mid + 1
+				} else {
+					ub = mid
+				}
 			}
+			if lo < len(n.kids) && n.kids[lo].key == key {
+				return n.kids[lo].n, j
+			}
+		}
+		return nil, 0
+	}
+	for i := range n.kids {
+		if c, adv, ok := matchChild(n.kids[i], path, start); ok {
+			return c, adv
 		}
 	}
 	return nil, 0
+}
+
+func matchChild(c staticChild, path string, start int) (*tnode, int, bool) {
+	key := c.key
+	if len(path)-start >= len(key) && path[start:start+len(key)] == key {
+		adv := start + len(key)
+		if adv == len(path) || path[adv] == '/' {
+			return c.n, adv, true
+		}
+	}
+	return nil, 0, false
 }
 
 // addParam returns the param/mixed edge for sg, creating it if needed. Edges
@@ -201,26 +244,31 @@ type methodEntry struct {
 }
 
 func (n *tnode) set(method string, h TypedHandler, keys *[8]string, mw http.Handler) {
+	l := n.leaf
+	if l == nil {
+		l = &leaf{}
+		n.leaf = l
+	}
 	if method == "" {
-		n.all = methodEntry{h, keys, mw}
-		n.bits = 1<<numMethods - 1
-		n.allow = buildAllow(n.bits, nil)
+		l.all = methodEntry{h, keys, mw}
+		l.bits = 1<<numMethods - 1
+		l.allow = buildAllow(l.bits, nil)
 		return
 	}
 	if i := methodIndex(method); i >= 0 {
-		n.h[i] = methodEntry{h, keys, mw}
-		n.bits |= 1 << i
+		l.h[i] = methodEntry{h, keys, mw}
+		l.bits |= 1 << i
 	} else {
-		if n.other == nil {
-			n.other = map[string]methodEntry{}
+		if l.other == nil {
+			l.other = map[string]methodEntry{}
 		}
-		n.other[method] = methodEntry{h, keys, mw}
+		l.other[method] = methodEntry{h, keys, mw}
 	}
-	names := make([]string, 0, len(n.other))
-	for m := range n.other {
+	names := make([]string, 0, len(l.other))
+	for m := range l.other {
 		names = append(names, m)
 	}
-	n.allow = buildAllow(n.bits, names)
+	l.allow = buildAllow(l.bits, names)
 }
 
 // buildAllow precomputes the sorted, comma-joined Allow value (net/http's
@@ -241,18 +289,22 @@ func buildAllow(bits uint16, other []string) string {
 }
 
 func (n *tnode) entry(method string) (methodEntry, bool) {
+	l := n.leaf
+	if l == nil {
+		return methodEntry{}, false
+	}
 	if i := methodIndex(method); i >= 0 {
-		if n.h[i].h != nil {
-			return n.h[i], true
+		if l.h[i].h != nil {
+			return l.h[i], true
 		}
-		if method == http.MethodHead && n.h[0].h != nil { // HEAD from GET
-			return n.h[0], true
+		if method == http.MethodHead && l.h[0].h != nil { // HEAD from GET
+			return l.h[0], true
 		}
-	} else if e, ok := n.other[method]; ok {
+	} else if e, ok := l.other[method]; ok {
 		return e, true
 	}
-	if n.all.h != nil { // Mount/Any: any method not otherwise handled
-		return n.all, true
+	if l.all.h != nil { // Mount/Any: any method not otherwise handled
+		return l.all, true
 	}
 	return methodEntry{}, false
 }
@@ -270,6 +322,7 @@ type Mux struct {
 	chain            http.Handler
 	frozen           bool
 	ctx              bool // a Context is needed (Use/inline/mount present)
+	mounted          bool // this mux is mounted under another one
 	notFound         http.Handler
 	methodNotAllowed http.Handler
 }
@@ -348,6 +401,9 @@ func (t *Mux) Mount(pattern string, h http.Handler) {
 	}
 	t.root.frozen = true
 	t.root.ctx = true
+	if sub, ok := h.(*Mux); ok {
+		sub.root.mounted = true // its requests may carry a parent Context
+	}
 	serve := func(w http.ResponseWriter, r *http.Request, rest string) {
 		if rest == "" {
 			rest = "/"
@@ -480,6 +536,7 @@ func (t *Mux) GetFunc(pattern string, fn http.HandlerFunc) {
 // methods seen on nodes that matched the path under another method (for 405).
 type trieMatch struct {
 	ps        Params
+	entry     methodEntry // resolved by find
 	bits      uint16
 	other     []string
 	allowNode *tnode // first node that matched the path under another method
@@ -487,8 +544,11 @@ type trieMatch struct {
 }
 
 func (m *trieMatch) allow(n *tnode) {
-	m.bits |= n.bits
-	for k := range n.other {
+	if n.leaf == nil {
+		return
+	}
+	m.bits |= n.leaf.bits
+	for k := range n.leaf.other {
 		if !slices.Contains(m.other, k) {
 			m.other = append(m.other, k)
 		}
@@ -525,11 +585,11 @@ func (t *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		root.ServeHTTP(w, r)
 		return
 	}
-	rctx := RouteContext(r.Context())
-	if rctx == nil && !root.ctx {
+	if !root.ctx && !root.mounted {
 		root.dispatch(w, r)
 		return
 	}
+	rctx := RouteContext(r.Context())
 	if rctx == nil {
 		rctx = ctxPool.Get().(*Context)
 		rctx.Reset()
@@ -545,40 +605,40 @@ func (t *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // dispatch is the fast path: no Context, params passed by value.
 func (t *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
+	path := requestPath(r)
 	var m trieMatch
-	n := t.find(t.trie, requestPath(r), 0, r.Method, hadTrailingSlash(r), &m)
+	n := t.find(t.trie, path, 0, r.Method, len(path) > 1 && path[len(path)-1] == '/', &m)
 	if n == nil {
 		t.miss(w, r, &m)
 		return
 	}
-	e, _ := n.entry(r.Method)
 	r.Pattern = n.pat
-	m.ps.keys = e.keys
-	e.h(w, r, m.ps)
+	m.ps.keys = m.entry.keys
+	m.entry.h(w, r, m.ps)
 }
 
 // dispatchCtx is the middleware/mount path: params go into the Context, and
 // the handler (or its inline chain) reads them from there.
 func (t *Mux) dispatchCtx(w http.ResponseWriter, r *http.Request) {
 	rctx := RouteContext(r.Context())
+	path := requestPath(r)
 	var m trieMatch
-	n := t.find(t.trie, requestPath(r), 0, r.Method, hadTrailingSlash(r), &m)
+	n := t.find(t.trie, path, 0, r.Method, len(path) > 1 && path[len(path)-1] == '/', &m)
 	if n == nil {
 		t.miss(w, r, &m)
 		return
 	}
-	e, _ := n.entry(r.Method)
 	r.Pattern = n.pat
-	m.ps.keys = e.keys
+	m.ps.keys = m.entry.keys
 	for i := 0; i < m.ps.n; i++ {
 		k, v := m.ps.At(i)
 		rctx.params.Add(k, v)
 	}
-	if e.mw != nil {
-		e.mw.ServeHTTP(w, r)
+	if m.entry.mw != nil {
+		m.entry.mw.ServeHTTP(w, r)
 		return
 	}
-	e.h(w, r, rctx.params)
+	m.entry.h(w, r, rctx.params)
 }
 
 // miss answers 405 when the path exists under another method, else 404.
@@ -601,11 +661,6 @@ func requestPath(r *http.Request) string {
 	return path
 }
 
-func hadTrailingSlash(r *http.Request) bool {
-	p := requestPath(r)
-	return len(p) > 1 && p[len(p)-1] == '/'
-}
-
 // find walks the trie, returning the first node that matches the path AND has
 // a handler for method. Static edges are deterministic, so they are walked in a
 // loop; recursion (with param rollback) is only used to backtrack over
@@ -618,7 +673,7 @@ func (t *Mux) find(n *tnode, path string, i int, method string, trail bool, m *t
 		if i == len(path) {
 			return t.terminal(n, method, trail, m)
 		}
-		if n.nkids != 0 || n.more != nil {
+		if n.nkids != 0 {
 			if c, adv := n.childAt(path, i+1); c != nil {
 				n, i = c, adv
 				continue
@@ -674,10 +729,11 @@ func (t *Mux) terminal(n *tnode, method string, trail bool, m *trieMatch) *tnode
 	if !n.isWild && n.trail != trail {
 		return nil
 	}
-	if _, ok := n.entry(method); ok {
+	if e, ok := n.entry(method); ok {
+		m.entry = e
 		return n
 	}
-	if n.bits != 0 || len(n.other) > 0 {
+	if n.leaf != nil && (n.leaf.bits != 0 || len(n.leaf.other) > 0) {
 		m.allow(n)
 	}
 	return nil
@@ -747,8 +803,8 @@ func (t *Mux) notAllowed(w http.ResponseWriter, r *http.Request, m *trieMatch) {
 		t.methodNotAllowed.ServeHTTP(w, r)
 		return
 	}
-	if !m.multi && m.allowNode != nil {
-		w.Header().Set("Allow", m.allowNode.allow)
+	if !m.multi && m.allowNode != nil && m.allowNode.leaf != nil {
+		w.Header().Set("Allow", m.allowNode.leaf.allow)
 	} else {
 		w.Header().Set("Allow", buildAllow(m.bits, m.other))
 	}

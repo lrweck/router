@@ -7,7 +7,7 @@ library build and does not add any dependency to it.
 ```sh
 cd bench
 go test -run='^$' -bench=BenchmarkQuick -benchtime=0.3s -count=5 -benchmem   # fast subset
-go test -run='^$' -bench=BenchmarkRouters -count=6 -benchmem > out.txt       # full
+go test -run='^$' -bench=BenchmarkRouters -benchtime=0.5s -count=6 -benchmem > out.txt   # full
 benchstat out.txt
 ```
 
@@ -143,14 +143,14 @@ architecture. Specifically, this does not measure:
 
 | scenario | **mux** | compat | stdlib | chi | httprouter | gin | echo | bunrouter | gorilla | fiber |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| static | **24.7** | 81.5 | 65.1 | 191.5 | 26.2 | 40.2 | 36.1 | 137.4 | 412.2 | 82.1 |
-| param | **36.7** | 119.8 | 108.8 | 329.8 | 56.9 | 41.2 | 50.0 | 44.5 | 626.5 | 111.4 |
-| deep | **55.5** | 273.2 | 251.2 | 382.9 | 71.5 | 61.1 | 76.4 | 162.9 | 951.0 | 157.2 |
-| wildcard | **30.9** | 457.2 | 276.8 | 308.2 | 42.9 | 45.1 | 40.3 | 141.2 | 509.1 | 105.0 |
-| many | **46.4** | 116.3 | 105.3 | 355.7 | 53.6 | 54.1 | 59.7 | 52.1 | 2586.5 | 180.6 |
-| longparam | **39.9** | 340.6 | 341.1 | 317.1 | 90.3 | 76.7 | 83.8 | 79.5 | 3302.5 | 139.3 |
-| miss | **14.4** | 433.5 | 546.1 | 297.5 | 243.8 | 52.2 | 632.5 | 208.8 | 2024.0 | 423.4 |
-| 405 | 55.0 | 1395.0 | 672.8 | 316.1 | 290.6 | 73.7 | 841.1 | **52.9** | 716.2 | 610.3 |
+| static | **18.0** | 71.5 | 58.0 | 182.5 | 21.0 | 35.5 | 34.0 | 140.0 | 389.0 | 83.0 |
+| param | **32.0** | 114.0 | 96.5 | 327.5 | 57.0 | 41.0 | 50.5 | 44.0 | 588.0 | 97.0 |
+| deep | **52.0** | 252.5 | 237.0 | 387.0 | 69.5 | 55.0 | 72.5 | 166.0 | 871.0 | 157.5 |
+| wildcard | **24.0** | 436.5 | 248.0 | 297.5 | 38.0 | 40.0 | 36.0 | 139.5 | 471.5 | 87.0 |
+| many | **42.0** | 109.5 | 93.0 | 334.0 | 49.5 | 56.5 | 50.0 | 43.0 | 2321.5 | 153.5 |
+| longparam | **34.0** | 319.5 | 312.0 | 324.5 | 87.0 | 68.5 | 72.0 | 75.0 | 2787.5 | 131.5 |
+| miss | **17.0** | 398.0 | 500.5 | 290.0 | 227.5 | 52.0 | 578.5 | 184.5 | 1999.5 | 396.5 |
+| 405 | **44.0** | 1378.0 | 623.0 | 283.0 | 264.0 | 66.0 | 799.5 | 46.0 | 761.0 | 564.5 |
 
 Allocations: `mux` is **0** everywhere (1 on the 405, same as gin, from
 canonicalizing the `Allow` header key); `compat` 0–11; `stdlib` 0–14; `chi` 2–5;
@@ -160,28 +160,28 @@ canonicalizing the `Allow` header key); `compat` 0–11; `stdlib` 0–14; `chi` 
 
 | scenario | **mux** | compat | chi | gorilla |
 |---|---:|---:|---:|---:|
-| `[0-9]+` | **44.3** | 153.7 | 400.4 | 656.5 |
-| UUID | **121.1** | 331.5 | 580.8 | 1145.5 |
-| blog (`date` + `slug`) | **111.5** | 313.5 | 670.2 | 1209.0 |
-| slug | **68.9** | 185.9 | 559.0 | 1088.0 |
+| `[0-9]+` | **37.0** | 136.0 | 388.5 | 614.0 |
+| UUID | **111.5** | 320.5 | 544.0 | 1105.0 |
+| blog (`date` + `slug`) | **87.5** | 293.0 | 605.0 | 1126.5 |
+| slug | **48.0** | 174.5 | 512.5 | 1041.0 |
 
 ### Constrained — non-regex group (+ `mux` without constraint)
 
 | scenario | **mux-plain** | httprouter | gin | echo | stdlib | fiber |
 |---|---:|---:|---:|---:|---:|---:|
-| `[0-9]+` | **37.8** | 40.4 | 48.6 | 49.6 | 101.8 | 97.0 |
-| UUID | 45.5 | 54.7 | 60.4 | **44.6** | 184.1 | 126.0 |
-| blog | **50.1** | 59.3 | 64.0 | 61.0 | 193.2 | 112.6 |
-| slug | 41.6 | 42.9 | 48.4 | **39.7** | 128.3 | 95.4 |
+| `[0-9]+` | **28.0** | 40.4 | 48.6 | 49.6 | 101.8 | 97.0 |
+| UUID | **29.5** | 54.7 | 60.4 | 44.6 | 184.1 | 126.0 |
+| blog | **42.0** | 59.3 | 64.0 | 61.0 | 193.2 | 112.6 |
+| slug | **28.5** | 42.9 | 48.4 | 39.7 | 128.3 | 95.4 |
 
 ### SIMD
 
-`GOEXPERIMENT=simd` does **not** change the constrained numbers above for
-`mux` (44.3/45.3, 121/151, 111/121, 68.9/69.0 — within noise). The realistic
-constraints validate in **short chunks** (8/4/12 bytes for a UUID), below the
-32-byte vector width, so only the SWAR path runs. SIMD pays off for a **long
-single-class parameter** — e.g. a 108-byte slug goes from 83 ns (SWAR) to
-44 ns (SIMD); see `BenchmarkValidator` in the main module.
+`GOEXPERIMENT=simd` does **not** improve the constrained numbers above for
+`mux` (default/SIMD: 38/34, 115/125, 92/109, 52/58 — the spread is host
+noise). The realistic constraints validate in **short chunks** (8/4/12 bytes
+for a UUID), below the 32-byte vector width, so only the SWAR path runs. SIMD
+pays off for a **long single-class parameter** — e.g. a 108-byte slug goes from
+83 ns (SWAR) to 44 ns (SIMD); see `BenchmarkValidator` in the main module.
 
 ### Parallel throughput
 
@@ -197,29 +197,30 @@ go test -run='^$' -bench=BenchmarkParallel -benchmem
 
 | variant | static | param | deep | constrained-uuid | miss |
 |---|---:|---:|---:|---:|---:|
-| **mux** | 3.8 | **5.8** | 9.1 | 17.3 | **2.7** |
-| mux-plain | 3.8 | 5.7 | 10.1 | **6.2** | 2.7 |
-| httprouter | **2.8** | 29.6 | 35.4 | 16.1 | 55.7 |
-| gin | 4.8 | 6.4 | **8.5** | 8.2 | 7.5 |
-| echo | 4.4 | 6.6 | 9.7 | 6.3 | 244.2 |
-| bunrouter | 119.8 | 5.5 | 135.0 | 7.1 | 53.0 |
-| stdlib | 64.8 | 78.7 | 107.2 | 87.4 | 257.8 |
-| compat | 67.4 | 82.9 | 110.7 | 103.4 | 151.9 |
-| chi | 121.2 | 229.8 | 260.9 | 285.6 | 177.1 |
-| gorilla | 265.6 | 383.2 | 452.2 | 478.3 | 413.3 |
-| fiber | 46.2 | 49.1 | 54.4 | 50.3 | 105.2 |
+| **mux** | **2.0** | **4.0** | **7.0** | 13.0 | **2.0** |
+| mux-plain | **2.0** | **4.0** | **7.0** | **3.0** | **2.0** |
+| httprouter | 3.0 | 31.5 | 36.5 | 16.0 | 57.7 |
+| gin | 5.0 | 6.7 | 8.8 | 8.0 | 7.3 |
+| echo | 4.0 | 6.5 | 10.0 | 6.0 | 250.8 |
+| bunrouter | 129.7 | 5.0 | 141.5 | 7.0 | 55.2 |
+| stdlib | 67.3 | 83.3 | 110.8 | 91.3 | 266.5 |
+| compat | 70.7 | 87.5 | 113.8 | 106.2 | 155.5 |
+| chi | 131.2 | 244.5 | 275.3 | 300.3 | 182.8 |
+| gorilla | 285.0 | 406.3 | 479.0 | 494.7 | 426.7 |
+| fiber | 50.3 | 52.2 | 59.2 | 54.0 | 109.7 |
 
-* **`mux` is first or second everywhere.** Its worst case is `static` at 1.36x
-  behind httprouter; on `param` and `miss` it is at or near the top. No locks,
-  no per-request allocation, so it scales with cores.
-* **`compat` inherits the stdlib's ceiling.** It tracks raw `stdlib` (67 vs 65
-  on static, 83 vs 79 on param) — both are limited by the `ServeMux`'s
+* **`mux` leads every no-constraint case.** It ties `mux-plain` on `static`,
+  `param` and `deep`, and is far ahead of the pack on `param` (4.0 vs 5.0 for
+  bunrouter) and `miss` (2.0 vs 7.3 for gin). No locks, no per-request
+  allocation, so it scales with cores.
+* **`compat` inherits the stdlib's ceiling.** It tracks raw `stdlib` (70.7 vs
+  67.3 on static, 87.5 vs 83.3 on param) — both are limited by the `ServeMux`'s
   `RWMutex`: the read lock is a shared atomic on one cache line, so it
-  ping-pongs across cores. Single-threaded `mux` was ~4x faster than `compat`;
-  in parallel it is ~15x, and that gap is the lock, not the routing.
+  ping-pongs across cores. Single-threaded `mux` is ~4x faster than `compat`;
+  in parallel it is ~35x, and that gap is the lock, not the routing.
 * **httprouter's per-request `Params` slice** costs it under load: its `param`
-  goes from 2.8 ns (static) to 29.6 ns, while `mux` (params by value) stays at
-  5.8. Allocations scale GC work with cores.
+  goes from 3.0 ns (static) to 31.5 ns, while `mux` (params by value) stays at
+  4.0. Allocations scale GC work with cores.
 * **gin and echo scale well** (they keep params in a per-request context of
   their own); `fiber` is middling here because the reused `RequestCtx` is per
   goroutine, not per connection pool.
@@ -228,13 +229,14 @@ go test -run='^$' -bench=BenchmarkParallel -benchmem
 
 ## Reading the numbers
 
-* **`mux` (typed) wins every no-constraint scenario** with 0 allocations. The
-  only loss is the 405 to bunrouter, by ~2 ns (noise).
-* **In the regex group `mux` wins by 2.7–10x.** The fixed-shape validator
+* **`mux` (typed) wins every no-constraint scenario** with 0 allocations,
+  including the 405 (44.0 vs bunrouter's 46.0).
+* **In the regex group `mux` wins by ~5–11x.** The fixed-shape validator
   (UUID, date) is a single linear pass — no backtracking, no allocation — and
   reuses the same byte-class scanner (SWAR/SIMD) as the simple cases.
-* **In the non-regex group `mux-plain` is at the top**, tied with echo.
-* **The `http.Handler` adapter is expensive**: `httprouter-http` is 184 ns vs
+* **In the non-regex group `mux-plain` leads all four** (28–42 ns, ahead of
+  echo and httprouter).
+* **The `http.Handler` adapter is expensive**: `httprouter-http` is 178 ns vs
   57 ns for its native handler on `param`. That is precisely why `mux` (typed)
   exists next to `compat` (stdlib semantics).
 * **`compat` beats `chi`** (the closest peer, same API style) by ~2.5x on hits,
