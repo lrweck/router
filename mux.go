@@ -207,21 +207,23 @@ func (n *tnode) set(method string, h TypedHandler, keys *[8]string) {
 		}
 		n.other[method] = methodEntry{h, keys}
 	}
-	n.allow = buildAllow(n.bits, n.other)
+	names := make([]string, 0, len(n.other))
+	for m := range n.other {
+		names = append(names, m)
+	}
+	n.allow = buildAllow(n.bits, names)
 }
 
 // buildAllow precomputes the sorted, comma-joined Allow value (net/http's
 // format), so a 405 costs no allocation. Registration-time only.
-func buildAllow(bits uint16, other map[string]methodEntry) string {
-	ms := make([]string, 0, numMethods)
+func buildAllow(bits uint16, other []string) string {
+	ms := make([]string, 0, numMethods+len(other))
 	for i := range numMethods {
 		if bits&(1<<i) != 0 {
 			ms = append(ms, methodNames[i])
 		}
 	}
-	for m := range other {
-		ms = append(ms, m)
-	}
+	ms = append(ms, other...)
 	if bits&1 != 0 && bits&(1<<5) == 0 {
 		ms = append(ms, http.MethodHead) // HEAD from GET
 	}
@@ -463,9 +465,6 @@ func (t *Mux) terminal(n *tnode, method string, trail bool, m *trieMatch) *tnode
 
 // matchParam validates seg against the param/mixed edge and appends its params.
 func matchParam(sg *segment, seg string, ps *Params) bool {
-	if sg == nil {
-		return false
-	}
 	if sg.kind == segParam {
 		if sg.v != nil && !sg.v(seg) {
 			return false
@@ -511,18 +510,6 @@ func routeKeys(segs []segment) [8]string {
 	return keys
 }
 
-// otherFrom adapts the custom-method list to the map buildAllow expects.
-func otherFrom(names []string) map[string]methodEntry {
-	if len(names) == 0 {
-		return nil
-	}
-	m := make(map[string]methodEntry, len(names))
-	for _, n := range names {
-		m[n] = methodEntry{}
-	}
-	return m
-}
-
 // notFoundOr serves the 404 handler, or a bare 404. Unlike Compat (which keeps
 // net/http's body), Mux is its own engine and defaults to an empty 404 body:
 // zero allocations. Set NotFound for a custom body.
@@ -543,7 +530,7 @@ func (t *Mux) notAllowed(w http.ResponseWriter, r *http.Request, m *trieMatch) {
 	if !m.multi && m.allowNode != nil {
 		w.Header().Set("Allow", m.allowNode.allow)
 	} else {
-		w.Header().Set("Allow", buildAllow(m.bits, otherFrom(m.other)))
+		w.Header().Set("Allow", buildAllow(m.bits, m.other))
 	}
 	// Bare 405 (no body), like the bare 404: Mux is its own engine.
 	w.WriteHeader(http.StatusMethodNotAllowed)

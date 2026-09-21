@@ -261,39 +261,26 @@ func shapeKey(segs []segment, trailing bool) string {
 	return b.String()
 }
 
-// computeNeedsCtx reports whether serving this route needs the request-scoped
-// Context. Plain params with native names don't: r.PathValue already has them.
-func (rt *route) computeNeedsCtx() bool {
-	if rt.isMount {
-		return true
-	}
-	for i := range rt.segs {
-		switch sg := &rt.segs[i]; sg.kind {
-		case segMixed, segWild:
-			return true
-		case segParam:
-			if !sg.direct {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// computeSimple reports whether the route can be served without extraction.
-func (rt *route) computeSimple() bool {
+// classify sets the per-route flags used to pick the serving path: simple
+// (extraction can be skipped entirely) and needsCtx (the request-scoped
+// Context is required).
+func (rt *route) classify() {
+	rt.simple = !rt.isMount
 	for i := range rt.segs {
 		switch sg := &rt.segs[i]; sg.kind {
 		case segStatic:
 		case segParam:
+			if !sg.direct {
+				rt.needsCtx = true
+			}
 			if !sg.direct || sg.v != nil {
-				return false
+				rt.simple = false
 			}
 		default: // mixed, wild
-			return false
+			rt.needsCtx = true
+			rt.simple = false
 		}
 	}
-	return true
 }
 
 // assignNames applies the shape registry to the route's param segments and

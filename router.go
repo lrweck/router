@@ -166,7 +166,7 @@ func (r *Compat) freeze() {
 func (r *Compat) Use(mws ...Middleware) {
 	if r.root == r {
 		if r.frozen {
-			panic("chi: all middlewares must be defined before routes on a mux")
+			panic("router: all middlewares must be defined before routes on a mux")
 		}
 		r.use = append(r.use, mws...)
 		return
@@ -197,7 +197,7 @@ func (r *Compat) Group(fn func(Router)) Router {
 // the sub-router so middleware can be added inside the closure.
 func (r *Compat) Route(pattern string, fn func(Router)) Router {
 	if fn == nil {
-		panic(fmt.Sprintf("chi: attempting to Route() a nil subrouter on '%s'", pattern))
+		panic(fmt.Sprintf("router: attempting to Route() a nil subrouter on '%s'", pattern))
 	}
 	sub := NewCompat()
 	fn(sub)
@@ -210,18 +210,18 @@ func (r *Compat) Route(pattern string, fn func(Router)) Router {
 // visible inside it via Param.
 func (r *Compat) Mount(pattern string, h http.Handler) {
 	if h == nil {
-		panic(fmt.Sprintf("chi: attempting to Mount() a nil handler on '%s'", pattern))
+		panic(fmt.Sprintf("router: attempting to Mount() a nil handler on '%s'", pattern))
 	}
 	if pattern == "" || pattern[0] != '/' {
-		panic(fmt.Sprintf("chi: routing pattern must begin with '/' in '%s'", pattern))
+		panic(fmt.Sprintf("router: routing pattern must begin with '/' in '%s'", pattern))
 	}
 	if sub, ok := h.(*Compat); ok && sub.mux == r.mux {
-		panic(fmt.Sprintf("chi: attempting to Mount() a router onto itself on '%s'", pattern))
+		panic(fmt.Sprintf("router: attempting to Mount() a router onto itself on '%s'", pattern))
 	}
 	full := pattern
 	for _, rt := range r.root.routes {
 		if rt.isMount && rt.mountBase == full {
-			panic(fmt.Sprintf("chi: attempting to Mount() a handler on an existing path, '%s'", pattern))
+			panic(fmt.Sprintf("router: attempting to Mount() a handler on an existing path, '%s'", pattern))
 		}
 	}
 	r.root.freeze()
@@ -456,7 +456,7 @@ func (r *Compat) addRoute(rt *route) {
 
 func (r *Compat) register(method, pattern string, h http.Handler) {
 	if pattern == "" || pattern[0] != '/' {
-		panic(fmt.Sprintf("chi: routing pattern must begin with '/' in '%s'", pattern))
+		panic(fmt.Sprintf("router: routing pattern must begin with '/' in '%s'", pattern))
 	}
 	r.root.freeze()
 	full := pattern
@@ -472,8 +472,7 @@ func (r *Compat) register(method, pattern string, h http.Handler) {
 		score:    scoreSegs(segs),
 	}
 	rt.assignNames(r.root)
-	rt.simple = rt.computeSimple()
-	rt.needsCtx = rt.computeNeedsCtx()
+	rt.classify()
 	inner := rt.inner()
 	for _, p := range rt.stdPatterns(method) {
 		r.muxRoute(p, rt, inner)
@@ -849,7 +848,7 @@ func (r *Compat) walkInternal(fn WalkFunc, parent string, parentMw Middlewares) 
 // FileServer serves files under path, like chi.FileServer.
 func FileServer(r *Compat, path string, root http.FileSystem) {
 	if strings.ContainsAny(path, "{}*") {
-		panic("chi: FileServer does not permit any URL parameters.")
+		panic("router: FileServer does not permit any URL parameters.")
 	}
 	if path != "/" && !strings.HasSuffix(path, "/") {
 		r.Get(path, http.RedirectHandler(path+"/", http.StatusMovedPermanently).ServeHTTP)
