@@ -14,6 +14,9 @@ import (
 // status, response bytes and duration for every request. A nil logger uses
 // slog.Default.
 //
+// It builds typed slog.Attr values and calls LogAttrs, so the numeric fields
+// (status, bytes, duration) are not boxed into any.
+//
 // The request ID is logged when the requestid middleware is in the chain (put
 // it before this one to read it from the context, though the response header is
 // checked too).
@@ -27,20 +30,27 @@ func New(log *slog.Logger) func(http.Handler) http.Handler {
 			ww := wrap.New(w)
 			next.ServeHTTP(ww, r)
 
-			attrs := []any{
-				"method", r.Method,
-				"path", r.URL.Path,
-				"route", r.Pattern,
-				"status", ww.Status(),
-				"bytes", ww.Bytes(),
-				"duration", time.Since(start),
+			attrs := []slog.Attr{
+				slog.String("method", r.Method),
+				slog.String("path", r.URL.Path),
+				slog.String("route", r.Pattern),
+				slog.Int("status", ww.Status()),
+				slog.Int64("bytes", ww.Bytes()),
+				slog.Duration("duration", time.Since(start)),
 			}
-			if id := requestid.From(r); id != "" {
-				attrs = append(attrs, "request_id", id)
-			} else if id := ww.Header().Get(requestid.Header); id != "" {
-				attrs = append(attrs, "request_id", id)
+			if id := requestID(r, ww); id != "" {
+				attrs = append(attrs, slog.String("request_id", id))
 			}
-			log.Log(r.Context(), slog.LevelInfo, "request", attrs...)
+			log.LogAttrs(r.Context(), slog.LevelInfo, "request", attrs...)
 		})
 	}
+}
+
+// requestID prefers the context (requestid outside this middleware) and falls
+// back to the response header (requestid inside it).
+func requestID(r *http.Request, w http.ResponseWriter) string {
+	if id := requestid.From(r); id != "" {
+		return id
+	}
+	return w.Header().Get(requestid.Header)
 }
