@@ -458,3 +458,132 @@ func TestMuxHandleFuncMethod(t *testing.T) {
 		t.Errorf("GET on PUT route = %d, want 405", got)
 	}
 }
+
+func mwTag(tag string) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Add("X-MW", tag)
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func TestMuxUse(t *testing.T) {
+	inits := 0
+	mw := func(next http.Handler) http.Handler {
+		inits++
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Root", "1")
+			next.ServeHTTP(w, r)
+		})
+	}
+	m := NewMux()
+	m.Use(mw)
+	m.Get("/a/{id}", func(w http.ResponseWriter, _ *http.Request, ps Params) { fmt.Fprint(w, ps.Get("id")) })
+
+	w := do(t, m, "GET", "/a/7")
+	if w.Body.String() != "7" || w.Header().Get("X-Root") != "1" {
+		t.Fatalf("Use: body=%q root=%q", w.Body.String(), w.Header().Get("X-Root"))
+	}
+	if inits != 1 {
+		t.Errorf("middleware constructor ran %d times, want 1", inits)
+	}
+	// A middleware sees params after next, like Chi.
+	m2 := NewMux()
+	m2.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r)
+			w.Header().Set("X-Param", Param(r, "id"))
+		})
+	})
+	m2.Get("/b/{id}", typed)
+	if got := do(t, m2, "GET", "/b/9").Header().Get("X-Param"); got != "9" {
+		t.Errorf("param in middleware after next = %q", got)
+	}
+}
+
+func TestMuxWithGroup(t *testing.T) {
+	m := NewMux()
+	m.Get("/plain", typed)
+	m.With(mwTag("with")).Get("/w", typed)
+	m.Group(func(g *Mux) {
+		g.Use(mwTag("group"))
+		g.Get("/g", typed)
+	})
+
+	if got := do(t, m, "GET", "/plain").Header().Get("X-MW"); got != "" {
+		t.Errorf("plain leaked middleware: %q", got)
+	}
+	if got := do(t, m, "GET", "/w").Header().Get("X-MW"); got != "with" {
+		t.Errorf("With = %q", got)
+	}
+	if got := do(t, m, "GET", "/g").Header().Get("X-MW"); got != "group" {
+		t.Errorf("Group = %q", got)
+	}
+}
+
+func TestMuxRoutePrefix(t *testing.T) {
+	m := NewMux()
+	m.Route("/api/{v}", func(r *Mux) {
+		r.Get("/users/{id}", func(w http.ResponseWriter, req *http.Request, ps Params) {
+			fmt.Fprintf(w, "%s/%s/%s", ps.Get("v"), ps.Get("id"), req.Pattern)
+		})
+		r.Route("/nested", func(r *Mux) {
+			r.Get("/x", func(w http.ResponseWriter, _ *http.Request, ps Params) { fmt.Fprint(w, ps.Get("v")) })
+		})
+	})
+	if got := do(t, m, "GET", "/api/v1/users/9").Body.String(); got != "v1/9//api/{v}/users/{id}" {
+		t.Errorf("Route = %q", got)
+	}
+	if got := do(t, m, "GET", "/api/v2/nested/x").Body.String(); got != "v2" {
+		t.Errorf("nested Route = %q", got)
+	}
+	if got := do(t, m, "GET", "/api/v1/nope").Code; got != 404 {
+		t.Errorf("miss = %d", got)
+	}
+}
+
+func TestMuxMount(t *testing.T) {
+	sub := NewMux()
+	sub.Get("/inner/{x}", func(w http.ResponseWriter, _ *http.Request, ps Params) { fmt.Fprint(w, ps.Get("x")) })
+
+	m := NewMux()
+	m.Route("/api/{v}", func(r *Mux) { r.Mount("/sub", sub) })
+
+	if got := do(t, m, "GET", "/api/v1/sub/inner/9").Body.String(); got != "9" {
+		t.Errorf("mounted Mux = %q", got)
+	}
+	// Bare mount path: the sub sees "/".
+	sub2 := NewMux()
+	sub2.Get("/", func(w http.ResponseWriter, _ *http.Request, _ Params) { fmt.Fprint(w, "root") })
+	m2 := NewMux()
+	m2.Mount("/h", sub2)
+	if got := do(t, m2, "GET", "/h").Body.String(); got != "root" {
+		t.Errorf("bare mount = %q", got)
+	}
+	// Mounting a plain http.Handler: the path is stripped.
+	m3 := NewMux()
+	m3.Mount("/files", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		fmt.Fprint(w, req.URL.Path)
+	}))
+	if got := do(t, m3, "GET", "/files/a/b").Body.String(); got != "/a/b" {
+		t.Errorf("mount handler path = %q", got)
+	}
+	if got := do(t, m3, "GET", "/files").Body.String(); got != "/" {
+		t.Errorf("mount bare path = %q", got)
+	}
+}
+
+func TestMuxMethodBeatsMount(t *testing.T) {
+	sub := NewMux()
+	sub.HandleAll("/", func(w http.ResponseWriter, _ *http.Request, _ Params) { fmt.Fprint(w, "sub") })
+	m := NewMux()
+	m.Mount("/x", sub)
+	m.Get("/x", func(w http.ResponseWriter, _ *http.Request, _ Params) { fmt.Fprint(w, "get") })
+	if got := do(t, m, "GET", "/x").Body.String(); got != "get" {
+		t.Errorf("method route should beat the mount: %q", got)
+	}
+	if got := do(t, m, "POST", "/x").Body.String(); got != "sub" {
+		t.Errorf("other method falls to the mount: %q", got)
+	}
+}

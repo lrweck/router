@@ -22,6 +22,7 @@ package router
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 )
@@ -83,6 +84,7 @@ type tnode struct {
 
 	h     [numMethods]methodEntry
 	other map[string]methodEntry // custom methods
+	all   methodEntry            // handler for every method (Mount/Any)
 	bits  uint16                 // methods with a handler, for Allow
 	allow string                 // precomputed Allow header value
 }
@@ -195,17 +197,24 @@ func (n *tnode) addParam(sg *segment) *tnode {
 type methodEntry struct {
 	h    TypedHandler
 	keys *[8]string
+	mw   http.Handler // non-nil when the route has inline middlewares
 }
 
-func (n *tnode) set(method string, h TypedHandler, keys *[8]string) {
+func (n *tnode) set(method string, h TypedHandler, keys *[8]string, mw http.Handler) {
+	if method == "" {
+		n.all = methodEntry{h, keys, mw}
+		n.bits = 1<<numMethods - 1
+		n.allow = buildAllow(n.bits, nil)
+		return
+	}
 	if i := methodIndex(method); i >= 0 {
-		n.h[i] = methodEntry{h, keys}
+		n.h[i] = methodEntry{h, keys, mw}
 		n.bits |= 1 << i
 	} else {
 		if n.other == nil {
 			n.other = map[string]methodEntry{}
 		}
-		n.other[method] = methodEntry{h, keys}
+		n.other[method] = methodEntry{h, keys, mw}
 	}
 	names := make([]string, 0, len(n.other))
 	for m := range n.other {
@@ -239,36 +248,155 @@ func (n *tnode) entry(method string) (methodEntry, bool) {
 		if method == http.MethodHead && n.h[0].h != nil { // HEAD from GET
 			return n.h[0], true
 		}
-		return methodEntry{}, false
+	} else if e, ok := n.other[method]; ok {
+		return e, true
 	}
-	e, ok := n.other[method]
-	return e, ok
+	if n.all.h != nil { // Mount/Any: any method not otherwise handled
+		return n.all, true
+	}
+	return methodEntry{}, false
 }
 
 // Mux is a segment-trie router with typed handlers.
 type Mux struct {
-	root             *tnode
+	trie   *tnode
+	root   *Mux
+	prefix string
+
+	inline []Middleware // With/Group/Route-level middlewares
+
+	// root-only state
+	use              []Middleware
+	chain            http.Handler
+	frozen           bool
+	ctx              bool // a Context is needed (Use/inline/mount present)
 	notFound         http.Handler
 	methodNotAllowed http.Handler
 }
 
 // NewMux creates an empty Mux.
-func NewMux() *Mux { return &Mux{root: &tnode{}} }
+func NewMux() *Mux {
+	m := &Mux{trie: &tnode{}}
+	m.root = m
+	return m
+}
+
+// Use appends middlewares, like chi. On the root mux it must be called before
+// routes; on a Group/Route sub-mux it scopes to that sub-mux.
+func (t *Mux) Use(mws ...Middleware) {
+	if t.root == t {
+		if t.frozen {
+			panic("router: all middlewares must be defined before routes on a mux")
+		}
+		t.use = append(t.use, mws...)
+	} else {
+		t.inline = append(t.inline, mws...)
+	}
+	if len(mws) > 0 {
+		t.root.ctx = true
+	}
+}
+
+// With returns a sub-mux with extra inline middlewares, like chi.
+func (t *Mux) With(mws ...Middleware) *Mux {
+	t.root.frozen = true
+	if len(mws) > 0 {
+		t.root.ctx = true
+	}
+	return &Mux{
+		trie:             t.trie,
+		root:             t.root,
+		prefix:           t.prefix,
+		inline:           append(slices.Clone(t.inline), mws...),
+		notFound:         t.root.notFound,
+		methodNotAllowed: t.root.methodNotAllowed,
+	}
+}
+
+// Group scopes middlewares without a path prefix, like chi.
+func (t *Mux) Group(fn func(*Mux)) *Mux {
+	im := t.With()
+	if fn != nil {
+		fn(im)
+	}
+	return im
+}
+
+// Route scopes a path prefix, like chi.
+func (t *Mux) Route(pattern string, fn func(*Mux)) *Mux {
+	if fn == nil {
+		panic("router: attempting to Route() a nil subrouter on '" + pattern + "'")
+	}
+	t.root.frozen = true
+	sub := &Mux{
+		trie:             t.trie,
+		root:             t.root,
+		prefix:           joinPrefix(t.prefix, pattern),
+		inline:           slices.Clone(t.inline),
+		notFound:         t.root.notFound,
+		methodNotAllowed: t.root.methodNotAllowed,
+	}
+	fn(sub)
+	return sub
+}
+
+// Mount attaches another handler at pattern, like chi. The handler sees the
+// path with the mount point stripped; params accumulate across the mount.
+func (t *Mux) Mount(pattern string, h http.Handler) {
+	if h == nil {
+		panic("router: attempting to Mount() a nil handler on '" + pattern + "'")
+	}
+	t.root.frozen = true
+	t.root.ctx = true
+	serve := func(w http.ResponseWriter, r *http.Request, rest string) {
+		if rest == "" {
+			rest = "/"
+		} else {
+			rest = "/" + rest
+		}
+		r2 := new(http.Request)
+		*r2 = *r
+		u2 := new(url.URL)
+		*u2 = *r.URL
+		u2.Path = rest
+		u2.RawPath = ""
+		r2.URL = u2
+		h.ServeHTTP(w, r2)
+	}
+	sub := func(w http.ResponseWriter, r *http.Request, ps Params) { serve(w, r, ps.Get("*")) }
+	if pattern == "/" || pattern == "" {
+		t.HandleAll("/*", sub)
+		return
+	}
+	t.HandleAll(pattern, func(w http.ResponseWriter, r *http.Request, _ Params) { serve(w, r, "") })
+	t.HandleAll(joinPrefix(pattern, "/*"), sub)
+}
 
 // NotFound sets the 404 handler.
-func (t *Mux) NotFound(h http.HandlerFunc) { t.notFound = h }
+func (t *Mux) NotFound(h http.HandlerFunc) { t.root.notFound = h }
 
 // MethodNotAllowed sets the 405 handler.
-func (t *Mux) MethodNotAllowed(h http.HandlerFunc) { t.methodNotAllowed = h }
+func (t *Mux) MethodNotAllowed(h http.HandlerFunc) { t.root.methodNotAllowed = h }
 
 // Handle registers a typed handler for method/pattern.
 func (t *Mux) Handle(method, pattern string, h TypedHandler) {
+	t.register(strings.ToUpper(method), pattern, h)
+}
+
+// HandleAll registers a typed handler for every method (used by Mount).
+func (t *Mux) HandleAll(pattern string, h TypedHandler) {
+	t.register("", pattern, h)
+}
+
+func (t *Mux) register(method, pattern string, h TypedHandler) {
 	if pattern == "" || pattern[0] != '/' {
 		panic("router: pattern must begin with '/' in '" + pattern + "'")
 	}
-	trailing := strings.HasSuffix(pattern, "/") && pattern != "/"
-	segs := mustParse(pattern)
-	n := t.root
+	t.root.freeze()
+	full := joinPrefix(t.prefix, pattern)
+	trailing := strings.HasSuffix(full, "/") && full != "/"
+	segs := mustParse(full)
+	n := t.trie
 	for i := range segs {
 		sg := segs[i]
 		switch sg.kind {
@@ -284,9 +412,38 @@ func (t *Mux) Handle(method, pattern string, h TypedHandler) {
 		}
 	}
 	n.trail = trailing
-	n.pat = pattern
+	n.pat = full
 	keys := routeKeys(segs)
-	n.set(strings.ToUpper(method), h, &keys)
+	var mw http.Handler
+	if len(t.inline) > 0 {
+		inner := h
+		mw = chainMiddlewares(t.inline, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			inner(w, r, RouteContext(r.Context()).params)
+		}))
+	}
+	n.set(method, h, &keys, mw)
+}
+
+// freeze builds the root middleware chain once (middleware constructors run a
+// single time) and marks the mux as registered.
+func (t *Mux) freeze() {
+	t.frozen = true
+	if t.chain == nil {
+		t.chain = chainMiddlewares(t.use, http.HandlerFunc(t.dispatchCtx))
+	}
+}
+
+func joinPrefix(prefix, pattern string) string {
+	if prefix == "" {
+		return pattern
+	}
+	if !strings.HasPrefix(pattern, "/") {
+		pattern = "/" + pattern
+	}
+	if pattern == "/" {
+		return strings.TrimSuffix(prefix, "/") + "/"
+	}
+	return strings.TrimSuffix(prefix, "/") + pattern
 }
 
 // Get registers a typed GET handler.
@@ -359,8 +516,81 @@ func nextSlash(path string, i int) int {
 	return i
 }
 
-// ServeHTTP matches the request against the trie and dispatches.
+// ServeHTTP matches the request against the trie and dispatches. Without
+// middlewares or mounts this is the allocation-free fast path; with them it
+// runs the middleware chain over the request-scoped Context, like Compat.
 func (t *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	root := t.root
+	if root != t {
+		root.ServeHTTP(w, r)
+		return
+	}
+	rctx := RouteContext(r.Context())
+	if rctx == nil && !root.ctx {
+		root.dispatch(w, r)
+		return
+	}
+	if rctx == nil {
+		rctx = ctxPool.Get().(*Context)
+		rctx.Reset()
+		defer ctxPool.Put(rctx)
+		r = r.WithContext(context.WithValue(r.Context(), RouteCtxKey, rctx))
+	}
+	if root.chain == nil {
+		root.dispatchCtx(w, r)
+		return
+	}
+	root.chain.ServeHTTP(w, r)
+}
+
+// dispatch is the fast path: no Context, params passed by value.
+func (t *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
+	var m trieMatch
+	n := t.find(t.trie, requestPath(r), 0, r.Method, hadTrailingSlash(r), &m)
+	if n == nil {
+		t.miss(w, r, &m)
+		return
+	}
+	e, _ := n.entry(r.Method)
+	r.Pattern = n.pat
+	m.ps.keys = e.keys
+	e.h(w, r, m.ps)
+}
+
+// dispatchCtx is the middleware/mount path: params go into the Context, and
+// the handler (or its inline chain) reads them from there.
+func (t *Mux) dispatchCtx(w http.ResponseWriter, r *http.Request) {
+	rctx := RouteContext(r.Context())
+	var m trieMatch
+	n := t.find(t.trie, requestPath(r), 0, r.Method, hadTrailingSlash(r), &m)
+	if n == nil {
+		t.miss(w, r, &m)
+		return
+	}
+	e, _ := n.entry(r.Method)
+	r.Pattern = n.pat
+	m.ps.keys = e.keys
+	for i := 0; i < m.ps.n; i++ {
+		k, v := m.ps.At(i)
+		rctx.params.Add(k, v)
+	}
+	if e.mw != nil {
+		e.mw.ServeHTTP(w, r)
+		return
+	}
+	e.h(w, r, rctx.params)
+}
+
+// miss answers 405 when the path exists under another method, else 404.
+func (t *Mux) miss(w http.ResponseWriter, r *http.Request, m *trieMatch) {
+	if m.bits != 0 || len(m.other) > 0 {
+		t.notAllowed(w, r, m)
+		return
+	}
+	t.notFoundOr(w, r)
+}
+
+func requestPath(r *http.Request) string {
 	path := r.URL.RawPath
 	if path == "" {
 		path = r.URL.Path
@@ -368,22 +598,12 @@ func (t *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if path == "" {
 		path = "/"
 	}
-	hadTrail := len(path) > 1 && path[len(path)-1] == '/'
+	return path
+}
 
-	var m trieMatch
-	n := t.find(t.root, path, 0, r.Method, hadTrail, &m)
-	if n == nil {
-		if m.bits != 0 || len(m.other) > 0 {
-			t.notAllowed(w, r, &m)
-		} else {
-			t.notFoundOr(w, r)
-		}
-		return
-	}
-	e, _ := n.entry(r.Method)
-	r.Pattern = n.pat
-	m.ps.keys = e.keys
-	e.h(w, r, m.ps)
+func hadTrailingSlash(r *http.Request) bool {
+	p := requestPath(r)
+	return len(p) > 1 && p[len(p)-1] == '/'
 }
 
 // find walks the trie, returning the first node that matches the path AND has

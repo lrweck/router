@@ -20,8 +20,10 @@ This library gives you both, without choosing for you:
   decoded param values, the `Allow` header format, `HEAD` served from `GET`.
   This is the default engine (`NewRouter()` is an alias for `NewCompat()`).
 - **`Mux`** is its own engine (a segment trie) with **typed handlers**, where
-  params arrive as arguments. This is the fast path: **zero allocations per
-  request**.
+  params arrive as arguments. It has the same structure API (`Use`, `With`,
+  `Group`, `Route`, `Mount`, `NotFound`, `MethodNotAllowed`) and is the fast
+  path: **zero allocations per request** as long as you don't use middlewares
+  or mounts (those need the request-scoped Context, like `Compat`).
 
 Both share the same pattern syntax — including Chi-style regex constraints,
 `{id:[0-9]+}`, implemented without the `regexp` package.
@@ -201,10 +203,10 @@ allocating the same as raw stdlib.
 - If you already use Chi and depend on **its ecosystem** (the `middleware`
   package, `docgen`, `render`, …), stay on Chi. Chi middlewares plug in here,
   but the subpackages do not exist.
-- If you want the **full feature set on the fast engine**: `Mux` today has
-  `Get/Post/Put/Handle`, the `GetFunc/HandleFunc` adapters and
-  `NotFound`/`MethodNotAllowed` — but it does **not** yet have
-  `Use/Group/Route/Mount`. For groups and sub-routers, use `Compat`.
+- If you need the **Chi middleware ecosystem** (the `middleware` package) with
+  the typed handlers: `Mux` accepts any `func(http.Handler) http.Handler`, so
+  Chi middlewares work — but a typed route with middlewares goes through the
+  request-scoped Context, which costs the usual couple of allocations.
 - If your goal is to **serve as fast as possible and you accept a framework**
   (gin, echo, fiber), they solve a lot beyond routing — and Fiber, being
   fasthttp, has a different server model.
@@ -222,6 +224,9 @@ allocating the same as raw stdlib.
 - `Mux` is its own engine: it does **not** promise stdlib semantics (the default
   404 has an empty body, for example). `Compat` is what preserves them.
 - A cap of **8 params** per route (the `Params` type is a fixed array).
+- `Mux` is allocation-free only while it has no middlewares and no mounts; both
+  need the pooled routing Context (params then flow through it, and `Param`/
+  `URLParam` work inside middleware after `next`).
 - The generic constraint matcher has a *budget*: an excessively pathological
   pattern fails the match (404) instead of hanging the server — a deliberate
   ceiling.
