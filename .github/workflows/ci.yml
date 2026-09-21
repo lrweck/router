@@ -67,6 +67,12 @@ jobs:
 
   race:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goexperiment: ["", "simd"]
+    env:
+      GOEXPERIMENT: ${{ matrix.goexperiment }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
