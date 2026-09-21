@@ -507,17 +507,53 @@ func TestMuxUse(t *testing.T) {
 	if inits != 1 {
 		t.Errorf("middleware constructor ran %d times, want 1", inits)
 	}
-	// A middleware sees params after next, like Chi.
+	// A route-scoped middleware (With/Group) runs after the match and sees the
+	// params after next, like Chi.
 	m2 := NewMux()
-	m2.Use(func(next http.Handler) http.Handler {
+	m2.With(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			next.ServeHTTP(w, r)
 			w.Header().Set("X-Param", Param(r, "id"))
 		})
-	})
-	m2.Get("/b/{id}", typed)
+	}).Get("/b/{id}", typed)
 	if got := do(t, m2, "GET", "/b/9").Header().Get("X-Param"); got != "9" {
-		t.Errorf("param in middleware after next = %q", got)
+		t.Errorf("param in route-scoped middleware after next = %q", got)
+	}
+
+	// A root middleware wraps the mux and keeps the fast path (no Context), so
+	// it reads the matched pattern instead of the params.
+	m3 := NewMux()
+	m3.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r)
+			if RouteContext(r.Context()) != nil {
+				t.Errorf("Use middleware must not create a routing Context")
+			}
+			w.Header().Set("X-Pattern", r.Pattern)
+		})
+	})
+	m3.Get("/c/{id}", typed)
+	if got := do(t, m3, "GET", "/c/9").Header().Get("X-Pattern"); got != "/c/{id}" {
+		t.Errorf("pattern in Use middleware after next = %q", got)
+	}
+}
+
+type nopWriter struct{ h http.Header }
+
+func (n *nopWriter) Header() http.Header         { return n.h }
+func (n *nopWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (n *nopWriter) WriteHeader(int)             {}
+
+// TestMuxUseKeepsFastPath pins the allocation contract: a root Use middleware
+// must not force the pooled Context.
+func TestMuxUseKeepsFastPath(t *testing.T) {
+	m := NewMux()
+	m.Use(func(next http.Handler) http.Handler { return next })
+	m.Get("/users/{id}", typed)
+	req := httptest.NewRequest("GET", "/users/42", nil)
+	nw := &nopWriter{h: http.Header{}}
+	if n := testing.AllocsPerRun(1000, func() { m.ServeHTTP(nw, req) }); n != 0 {
+		t.Errorf("Use middleware = %v allocs/op, want 0", n)
 	}
 }
 

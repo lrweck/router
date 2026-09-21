@@ -321,7 +321,7 @@ type Mux struct {
 	use              []Middleware
 	chain            http.Handler
 	frozen           bool
-	ctx              bool // a Context is needed (Use/inline/mount present)
+	ctx              bool // a Context is needed (route-scoped middleware or a mount)
 	mounted          bool // this mux is mounted under another one
 	notFound         http.Handler
 	methodNotAllowed http.Handler
@@ -336,17 +336,23 @@ func NewMux() *Mux {
 
 // Use appends middlewares, like chi. On the root mux it must be called before
 // routes; on a Group/Route sub-mux it scopes to that sub-mux.
+//
+// A root middleware wraps the mux's dispatch and keeps the allocation-free
+// path: the typed handler still receives its Params as arguments and no request
+// Context is created. It sees the matched pattern on r.Pattern after next, but
+// not the path parameters (there is no Context); a middleware that needs them
+// goes on the route with With/Group, which does use the pooled Context.
 func (t *Mux) Use(mws ...Middleware) {
 	if t.root == t {
 		if t.frozen {
 			panic("router: all middlewares must be defined before routes on a mux")
 		}
 		t.use = append(t.use, mws...)
-	} else {
-		t.inline = append(t.inline, mws...)
+		return
 	}
+	t.inline = append(t.inline, mws...)
 	if len(mws) > 0 {
-		t.root.ctx = true
+		t.root.ctx = true // route-scoped: keep params reachable from the Context
 	}
 }
 
@@ -481,11 +487,12 @@ func (t *Mux) register(method, pattern string, h TypedHandler) {
 }
 
 // freeze builds the root middleware chain once (middleware constructors run a
-// single time) and marks the mux as registered.
+// single time) and marks the mux as registered. The chain wraps serve, so a
+// root middleware does not force the Context path.
 func (t *Mux) freeze() {
 	t.frozen = true
-	if t.chain == nil {
-		t.chain = chainMiddlewares(t.use, http.HandlerFunc(t.dispatchCtx))
+	if t.chain == nil && len(t.use) > 0 {
+		t.chain = chainMiddlewares(t.use, http.HandlerFunc(t.serve))
 	}
 }
 
@@ -576,31 +583,30 @@ func nextSlash(path string, i int) int {
 	return i
 }
 
-// ServeHTTP matches the request against the trie and dispatches. Without
-// middlewares or mounts this is the allocation-free fast path; with them it
-// runs the middleware chain over the request-scoped Context, like Compat.
+// ServeHTTP matches the request against the trie and dispatches. Without a
+// Context it is the allocation-free fast path; root middlewares wrap it without
+// forcing a Context.
 func (t *Mux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	root := t.root
 	if root != t {
 		root.ServeHTTP(w, r)
 		return
 	}
-	if !root.ctx && !root.mounted {
-		root.dispatch(w, r)
+	if root.chain != nil {
+		root.chain.ServeHTTP(w, r)
 		return
 	}
-	rctx := RouteContext(r.Context())
-	if rctx == nil {
-		rctx = ctxPool.Get().(*Context)
-		rctx.Reset()
-		defer ctxPool.Put(rctx)
-		r = r.WithContext(context.WithValue(r.Context(), RouteCtxKey, rctx))
-	}
-	if root.chain == nil {
-		root.dispatchCtx(w, r)
+	root.serve(w, r)
+}
+
+// serve picks the dispatch path: the Context-free fast path unless a Context is
+// needed (route-scoped middleware, or a mount accumulating parent params).
+func (t *Mux) serve(w http.ResponseWriter, r *http.Request) {
+	if t.ctx || t.mounted {
+		t.dispatchCtx(w, r)
 		return
 	}
-	root.chain.ServeHTTP(w, r)
+	t.dispatch(w, r)
 }
 
 // dispatch is the fast path: no Context, params passed by value.
@@ -617,10 +623,16 @@ func (t *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 	m.entry.h(w, r, m.ps)
 }
 
-// dispatchCtx is the middleware/mount path: params go into the Context, and
-// the handler (or its inline chain) reads them from there.
+// dispatchCtx is the Context path: params go into the pooled Context, and the
+// handler (or its inline chain) reads them from there.
 func (t *Mux) dispatchCtx(w http.ResponseWriter, r *http.Request) {
 	rctx := RouteContext(r.Context())
+	if rctx == nil {
+		rctx = ctxPool.Get().(*Context)
+		rctx.Reset()
+		defer ctxPool.Put(rctx)
+		r = r.WithContext(context.WithValue(r.Context(), RouteCtxKey, rctx))
+	}
 	path := requestPath(r)
 	var m trieMatch
 	n := t.find(t.trie, path, 0, r.Method, len(path) > 1 && path[len(path)-1] == '/', &m)

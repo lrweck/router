@@ -22,8 +22,9 @@ This library gives you both, without choosing for you:
 - **`Mux`** is its own engine (a segment trie) with **typed handlers**, where
   params arrive as arguments. It has the same structure API (`Use`, `With`,
   `Group`, `Route`, `Mount`, `NotFound`, `MethodNotAllowed`) and is the fast
-  path: **zero allocations per request** as long as you don't use middlewares
-  or mounts (those need the request-scoped Context, like `Compat`).
+  path: **zero allocations per request**, root middlewares included. Only
+  route-scoped middleware (`With`/`Group`) and mounts need the request-scoped
+  Context, like `Compat`.
 
 Both share the same pattern syntax — including Chi-style regex constraints,
 `{id:[0-9]+}`, implemented without the `regexp` package.
@@ -168,6 +169,25 @@ pay off. Everything below is measured in [`bench/README.md`](bench/README.md).
 - **The generic fallback** keeps a step *budget*, so a pathological pattern
   fails the match (404) instead of hanging the server — a deliberate ceiling.
 
+## Middlewares (optional)
+
+The middlewares live in their own packages under [`middleware/`](middleware) and
+are **opt-in**: you import only what you use, and none of them add a dependency
+(the module stays standard-library only — a test enforces it). They all have the
+`func(http.Handler) http.Handler` signature, so they work with `Compat`, with
+`Mux`, and with a plain `net/http` server.
+
+```go
+r.Use(requestid.New(), recoverer.New(nil), logger.New(nil))
+```
+
+On `Mux`, a root `Use` middleware keeps the zero-allocation path: it sees the
+matched pattern (`r.Pattern`) after `next`, but not the params (no Context).
+Middleware that needs the params goes on the route with `With`/`Group`. Header
+handling follows the RFCs (RFC 9110 `Accept-Encoding`, RFC 7239 `Forwarded`,
+RFC 7617 Basic, RFC 6454 `Origin`); see
+[`middleware/README.md`](middleware/README.md) for the list and the notes.
+
 ## Reality check
 
 Routing is a **tiny** part of a real request. A route match here costs tens of
@@ -242,9 +262,10 @@ allocating the same as raw stdlib.
 - `Mux` is its own engine: it does **not** promise stdlib semantics (the default
   404 has an empty body, for example). `Compat` is what preserves them.
 - A cap of **8 params** per route (the `Params` type is a fixed array).
-- `Mux` is allocation-free only while it has no middlewares and no mounts; both
-  need the pooled routing Context (params then flow through it, and `Param`/
-  `URLParam` work inside middleware after `next`).
+- On `Mux`, root middleware added with `Use` keeps the zero-allocation path and
+  does not see the path parameters (read `r.Pattern` instead, or use a
+  route-scoped `With`/`Group` middleware, where `Param`/`URLParam` work after
+  `next`). Mounts always use the pooled Context.
 - The generic constraint matcher has a *budget*: an excessively pathological
   pattern fails the match (404) instead of hanging the server — a deliberate
   ceiling.
