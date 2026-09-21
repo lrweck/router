@@ -1,0 +1,11 @@
+# Binaries and test artifacts
+*.test
+*.exe
+*.prof
+*.out
+
+# Coverage
+coverage.out
+
+# OS
+.DS_Store
