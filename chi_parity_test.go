@@ -1,10 +1,11 @@
+// Behavioral parity tests ported from Chi's mux_test.go.
+//
+// Source: github.com/go-chi/chi (MIT, Copyright (c) 2015-present Peter
+// Kieltyka, Google Inc.). These cases and their expectations are adapted from
+// Chi's test suite; the handful of divergences are called out inline (empty
+// path segments, escaped params, "//" cleaning) and are inherent to
+// net/http.ServeMux. See NOTICE.md for the full attribution and license.
 package router
-
-// Behavioral parity tests ported from Chi's mux_test.go
-// (github.com/go-chi/chi, MIT). They assert the same observable behavior as
-// Chi wherever the stdlib backend allows it; the handful of divergences are
-// called out inline (empty path segments, escaped params, "//" cleaning) and
-// are inherent to net/http.ServeMux.
 
 import (
 	"context"

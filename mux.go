@@ -2,11 +2,18 @@ package router
 
 // Mux: a hand-rolled routing core for when you need to beat net/http's mux.
 //
-// The compatible API (Router, backed by ServeMux) stays the default. This is
+// The typed-handler idea — a tree router whose handler takes the path
+// parameters as arguments, so a match allocates nothing — is httprouter's
+// (github.com/julienschmidt/httprouter, BSD-3-Clause). The static-first
+// matching strategy was informed by matchit (github.com/ibraheemdev/matchit,
+// MIT, the router behind axum). Both were reimplemented, not copied; see
+// NOTICE.md.
+//
+// The compatible API (Compat, backed by ServeMux) stays the default. This is
 // the opt-in fast path: a segment trie with typed handlers, so path parameters
 // arrive as arguments and no per-request Context or PathValue is allocated.
 // Compatible handlers are built on top of the typed ones (the reverse of how
-// the ServeMux-backed Router works), like httprouter's 3-arg core with
+// the ServeMux-backed Compat works), like httprouter's 3-arg core with
 // http.Handler adapters.
 //
 // Reuses the same pattern syntax as the rest of the package (see pattern.go):

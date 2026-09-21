@@ -1,8 +1,9 @@
 // Constraint validation without the regexp package.
 //
-// Chi supports {name:regex} params with full RE2 syntax. regexp is slow and
-// heavy for route matching, so this file compiles the common subset of
-// constraints into a small backtracking matcher over plain predicates:
+// Chi supports {name:regex} params with full RE2 syntax (github.com/go-chi/chi,
+// MIT). regexp is slow and heavy for route matching, so this file compiles the
+// common subset of constraints into a small backtracking matcher over plain
+// predicates:
 //
 //   - character classes: [0-9], [a-z-], [^...], \d \D \w \W \s \S
 //   - literals and escapes: \. \- \\ \t \n \r ...
@@ -864,6 +865,16 @@ func (p *cparser) parseClass() cnode {
 	return n
 }
 
+// SWAR (SIMD Within A Register) byte-class checks: classify 8 bytes per
+// iteration with plain uint64 arithmetic, no SIMD toolchain required. The
+// technique is from Hacker's Delight (Henry S. Warren Jr.) and Daniel Lemire's
+// SWAR write-ups; see NOTICE.md.
+//
+// Deliberately carry-free: the classic hasless/hasmore propagate borrows
+// between bytes, which is fine for an "is there any" test but wrong when masks
+// are AND-ed/OR-ed across ranges. The comparisons here add a constant and read
+// bit 7 instead (both addends < 128, and input high bits are rejected up
+// front), so they compose correctly.
 const (
 	swarOnes = 0x0101010101010101
 	swarHigh = 0x8080808080808080

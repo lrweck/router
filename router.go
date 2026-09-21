@@ -1,5 +1,7 @@
 // Package router gives you the Chi API (routes, groups, params, sub-routers)
-// in two engines:
+// in two engines. The API, the pattern syntax and the behavioral test suite are
+// derived from Chi (github.com/go-chi/chi, MIT); see NOTICE.md for the full
+// attribution and licenses.
 //
 //   - [Compat]: Chi-compatible handlers (http.HandlerFunc), backed by
 //     net/http.ServeMux, so it keeps the stdlib's routing semantics. This is

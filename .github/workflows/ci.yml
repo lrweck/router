@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go vet (bench module)
+        run: cd bench && go vet ./...
+      - name: golangci-lint
+        uses: golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Minimum supported Go (go.mod directive).
+          - go: "1.24.x"
+            goexperiment: ""
+          # Latest, default build (SWAR path).
+          - go: "stable"
+            goexperiment: ""
+          # Latest, GOEXPERIMENT=simd build (bytes_simd.go).
+          - go: "stable"
+            goexperiment: "simd"
+    env:
+      GOEXPERIMENT: ${{ matrix.goexperiment }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - name: Test + coverage
+        run: go test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+      - name: Upload coverage to Codecov
+        if: matrix.go == 'stable' && matrix.goexperiment == ''
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Test with the race detector
+        run: go test -race -count=1 ./...
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Fuzz (short smoke run)
+        run: |
+          go test -run=NONE -fuzz=FuzzMux -fuzztime=15s .
+          go test -run=NONE -fuzz=FuzzConstraintFastVsGeneric -fuzztime=15s .
+          go test -run=NONE -fuzz=FuzzBytesInClass -fuzztime=15s .

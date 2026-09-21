@@ -43,16 +43,27 @@ m.Get("/users/{id:[0-9]+}", func(w http.ResponseWriter, req *http.Request, ps ro
 })
 ```
 
-## Inspirations
+## Inspirations and credits
 
-- **[Chi](https://github.com/go-chi/chi)** — the whole API: `Get`/`Post`/…,
-  `Use`/`With`/`Group`/`Route`/`Mount`, `URLParam`, `RouteContext`,
-  `Walk`/`Routes`, the `Router` interface in closures.
-- **[httprouter](https://github.com/julienschmidt/httprouter)** — the typed
-  handler idea (params as arguments, zero garbage on the match path) and the
-  tree as the core of the fast engine.
-- **[matchit](https://github.com/ibraheemdev/matchit)** (Rust/axum) — preferring
-  static children and matching by comparing directly against the path.
+**This project stands on other people's work, and the debt is mostly to Chi.**
+The full, per-project attribution (with licenses) is in
+[`NOTICE.md`](NOTICE.md); the short version:
+
+- **[Chi](https://github.com/go-chi/chi)** — **the biggest debt by far.** The
+  whole public API is a deliberate reimplementation of Chi's (`NewRouter`,
+  `Get`/`Post`/…, `Use`/`With`/`Group`/`Route`/`Mount`, `URLParam`,
+  `RouteContext`, `Walk`/`Routes`, the `Router` interface in closures), the
+  `{name}`/`{name:regexp}`/`*` pattern syntax is Chi's, and the behavioral test
+  suite in [`chi_parity_test.go`](chi_parity_test.go) is **ported from Chi's
+  `mux_test.go`** (Chi is MIT — its license is reproduced in full in
+  `NOTICE.md`, as required for a derivative of its tests). The goal is that Chi
+  code runs here unchanged.
+- **[httprouter](https://github.com/julienschmidt/httprouter)** — the `Mux`
+  engine's central idea (a tree router whose handler takes the params as
+  arguments, so a match allocates nothing). Reimplemented, not copied.
+- **[matchit](https://github.com/ibraheemdev/matchit)** (Rust/axum) — the
+  static-first matching and the "compare directly against the path, prefer the
+  most likely branch" approach.
 - **`net/http`** — the behavior. Where Chi and the stdlib disagree, **the stdlib
   wins**, and that is pinned in `stdlib_behavior_test.go`:
 
@@ -63,6 +74,10 @@ m.Get("/users/{id:[0-9]+}", func(w http.ResponseWriter, req *http.Request, ps ro
 | param with `%2f` | returns the escaped value | returns it decoded |
 | 405 `Allow` | one header per method | a single `"GET, HEAD, POST"` |
 | `HEAD` | needs `Head`/`GetHead` | served from `GET` |
+
+- **Hacker's Delight** — the SWAR (SIMD-within-a-register) byte-class scanner
+  follows the classic bit tricks, with carry-free comparisons (the usual
+  `hasless` propagates borrows and breaks when masks are combined).
 
 ## The tricks
 
