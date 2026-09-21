@@ -112,7 +112,7 @@ func acceptsGzip(ae string) bool {
 		return false
 	}
 	gzipQ, starQ := -1.0, -1.0
-	for _, part := range strings.Split(ae, ",") {
+	for part := range strings.SplitSeq(ae, ",") {
 		coding, params, _ := strings.Cut(part, ";")
 		q := qvalue(params)
 		switch {
@@ -131,7 +131,7 @@ func acceptsGzip(ae string) bool {
 // qvalue parses the ";q=" parameter of an Accept-Encoding entry (RFC 9110
 // §12.4.2). It returns 1 when the parameter is absent or malformed.
 func qvalue(params string) float64 {
-	for _, p := range strings.Split(params, ";") {
+	for p := range strings.SplitSeq(params, ";") {
 		v, ok := strings.CutPrefix(strings.TrimSpace(p), "q=")
 		if !ok {
 			continue
