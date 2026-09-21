@@ -1,0 +1,9 @@
+version: "2"
+
+linters:
+  exclusions:
+    rules:
+      # Handlers in tests write to a recorder and ignore the error; that is
+      # noise, not a real unchecked error.
+      - path: _test\.go
+        linters: [errcheck]

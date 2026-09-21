@@ -508,6 +508,12 @@ func TestChiMuxRouteGroups(t *testing.T) {
 
 func TestChiMuxBig(t *testing.T) {
 	r := chiBigMux(t)
+	// Divergence: Chi returns 404 for "/folders"; the stdlib ServeMux
+	// canonicalizes it to "/folders/" with a redirect (301 or 307 depending on
+	// the Go version). Documented.
+	if w := do(t, r, "GET", "/folders"); !isRedirect(w.Code) || w.Header().Get("Location") != "/folders/" {
+		t.Errorf("GET /folders = %d %q, want a redirect -> /folders/", w.Code, w.Header().Get("Location"))
+	}
 	for _, tc := range []struct{ method, path, want string }{
 		{"GET", "/favicon.ico", "fav"},
 		{"GET", "/hubs/4/view", "/hubs/4/view reqid:1 session:anonymous"},
@@ -520,9 +526,6 @@ func TestChiMuxBig(t *testing.T) {
 		{"GET", "/hubs/123/touch", "/hubs/123/touch reqid:1 session:elvis"},
 		{"GET", "/hubs/123/webhooks", "/hubs/123/webhooks reqid:1 session:elvis"},
 		{"GET", "/hubs/123/posts", "/hubs/123/posts reqid:1 session:elvis"},
-		// Divergence: Chi returns 404 for "/folders"; the stdlib ServeMux
-		// canonicalizes "/folders" to "/folders/" with a 301. Documented.
-		{"GET", "/folders", "<a href=\"/folders/\">Temporary Redirect</a>.\n\n"},
 		{"GET", "/folders/", "/folders/ reqid:1 session:elvis"},
 		{"GET", "/folders/public", "/folders/public reqid:1 session:elvis"},
 		{"GET", "/folders/nothing", "404 page not found\n"},

@@ -69,8 +69,8 @@ The full, per-project attribution (with licenses) is in
 
 | case | Chi | here (= stdlib) |
 |---|---|---|
-| `/x` with only `/x/` registered | 404 | 307 → `/x/` |
-| `//` or `.` in the path | routes with empty params | 307 (canonicalization) |
+| `/x` with only `/x/` registered | 404 | redirect → `/x/` (301/307) |
+| `//` or `.` in the path | routes with empty params | redirect (canonicalization) |
 | param with `%2f` | returns the escaped value | returns it decoded |
 | 405 `Allow` | one header per method | a single `"GET, HEAD, POST"` |
 | `HEAD` | needs `Head`/`GetHead` | served from `GET` |

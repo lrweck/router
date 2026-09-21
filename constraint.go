@@ -696,28 +696,30 @@ func (p *cparser) parseSingle() cnode {
 	return litNode("")
 }
 
+func isDigit(b byte) bool { return '0' <= b && b <= '9' }
+
+func isWord(b byte) bool {
+	return isDigit(b) || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || b == '_'
+}
+
+func isSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\f' || b == '\v'
+}
+
 func classPred(c byte) func(byte) bool {
 	switch c {
 	case 'd':
-		return func(b byte) bool { return '0' <= b && b <= '9' }
+		return isDigit
 	case 'D':
-		return func(b byte) bool { return b < '0' || b > '9' }
+		return func(b byte) bool { return !isDigit(b) }
 	case 'w':
-		return func(b byte) bool {
-			return '0' <= b && b <= '9' || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || b == '_'
-		}
+		return isWord
 	case 'W':
-		return func(b byte) bool {
-			return !('0' <= b && b <= '9' || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || b == '_')
-		}
+		return func(b byte) bool { return !isWord(b) }
 	case 's':
-		return func(b byte) bool {
-			return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\f' || b == '\v'
-		}
+		return isSpace
 	case 'S':
-		return func(b byte) bool {
-			return !(b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\f' || b == '\v')
-		}
+		return func(b byte) bool { return !isSpace(b) }
 	}
 	return nil
 }
