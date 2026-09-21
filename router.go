@@ -98,8 +98,7 @@ type Compat struct {
 	byScore          []*route            // routes sorted by score desc, rebuilt on register
 	slots            map[string]*slot    // stdlib pattern -> candidate routes sharing it
 	shapeNames       map[string][]string // pattern shape -> stdlib placeholder per segment
-	cachedChain      http.Handler
-	cachedUseLen     int
+	chain            http.Handler        // built at Use time; read-only while serving
 	catchallOnce     sync.Once
 	missFirst        map[string]struct{} // first static segments, for the miss filter
 	notFound         http.Handler
@@ -153,6 +152,17 @@ var _ Router = (*Compat)(nil)
 // Use appends middlewares, like chi. On a root router it panics if routes
 // were already registered (same rule as Chi); on a Route/With sub-router it
 // scopes to that sub-router.
+// freeze marks the router as registered and builds the middleware chain once
+// (like Chi's updateRouteHandler), so middleware constructors run a single time
+// and the chain is read-only while serving.
+func (r *Compat) freeze() {
+	root := r.root
+	root.frozen = true
+	if root.chain == nil {
+		root.chain = chainMiddlewares(root.use, http.HandlerFunc(root.dispatch))
+	}
+}
+
 func (r *Compat) Use(mws ...Middleware) {
 	if r.root == r {
 		if r.frozen {
@@ -166,7 +176,7 @@ func (r *Compat) Use(mws ...Middleware) {
 
 // With returns a sub-router with extra inline middlewares, like chi.
 func (r *Compat) With(mws ...Middleware) Router {
-	r.root.frozen = true
+	r.root.freeze()
 	return &Compat{
 		mux:    r.mux,
 		root:   r.root,
@@ -214,7 +224,7 @@ func (r *Compat) Mount(pattern string, h http.Handler) {
 			panic(fmt.Sprintf("chi: attempting to Mount() a handler on an existing path, '%s'", pattern))
 		}
 	}
-	r.root.frozen = true
+	r.root.freeze()
 
 	if sub, ok := h.(*Compat); ok {
 		if sub.notFound == nil && r.root.notFound != nil {
@@ -448,7 +458,7 @@ func (r *Compat) register(method, pattern string, h http.Handler) {
 	if pattern == "" || pattern[0] != '/' {
 		panic(fmt.Sprintf("chi: routing pattern must begin with '/' in '%s'", pattern))
 	}
-	r.root.frozen = true
+	r.root.freeze()
 	full := pattern
 	segs := mustParse(full)
 	rt := &route{
@@ -509,10 +519,9 @@ func (r *Compat) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		root.ServeHTTP(w, req)
 		return
 	}
-	chain := root.cachedChain
-	if chain == nil || root.cachedUseLen != len(root.use) {
-		chain = chainMiddlewares(root.use, http.HandlerFunc(root.dispatch))
-		root.cachedChain, root.cachedUseLen = chain, len(root.use)
+	chain := root.chain
+	if chain == nil {
+		chain = http.HandlerFunc(root.dispatch)
 	}
 	chain.ServeHTTP(w, req)
 }
